@@ -22,17 +22,15 @@ def questions_keyboard(
     *,
     section_index: int,
     questions: list[FAQItem],
-    allow_custom_question: bool,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for item in questions:
         builder.button(text=item.question, callback_data=f"question:{item.id}")
 
-    if allow_custom_question:
-        builder.button(
-            text=NO_ANSWER_BUTTON_TEXT,
-            callback_data=f"ask:{section_index}",
-        )
+    builder.button(
+        text=NO_ANSWER_BUTTON_TEXT,
+        callback_data=f"ask:{section_index}",
+    )
 
     builder.button(text="⬅️ Назад к разделам", callback_data="main_menu")
     builder.button(text="🏠 Главное меню", callback_data="main_menu")

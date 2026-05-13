@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 import os
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 FAQ_FILE = BASE_DIR / "Вопросы.xlsx"
 DB_FILE = BASE_DIR / "bot.sqlite3"
+DEFAULT_DUTY_CUTOFF_HOUR = 21
+DEFAULT_APP_TIMEZONE = "Europe/Moscow"
 
 CASTINGS_SECTION = "Кастинги/букинги/съемки"
 INCOME_SECTION = "Дополнительный доход для моделей"
@@ -54,6 +57,8 @@ CONTACTS = [
 class Settings:
     bot_token: str
     booker_ids: set[int]
+    duty_cutoff_hour: int = DEFAULT_DUTY_CUTOFF_HOUR
+    app_timezone: str = DEFAULT_APP_TIMEZONE
     faq_file: Path = FAQ_FILE
     db_file: Path = DB_FILE
 
@@ -68,6 +73,10 @@ def load_settings() -> Settings:
     return Settings(
         bot_token=bot_token,
         booker_ids=_parse_booker_ids(os.getenv("BOOKER_IDS", "")),
+        duty_cutoff_hour=_parse_duty_cutoff_hour(
+            os.getenv("DUTY_CUTOFF_HOUR", str(DEFAULT_DUTY_CUTOFF_HOUR))
+        ),
+        app_timezone=_parse_app_timezone(os.getenv("APP_TIMEZONE", DEFAULT_APP_TIMEZONE)),
     )
 
 
@@ -85,10 +94,13 @@ def section_key_for_section(section: str) -> str | None:
     return None
 
 
-def _parse_booker_ids(raw_value: str) -> set[int]:
+def _parse_booker_ids(raw_value: str | None) -> set[int]:
     ids: set[int] = set()
+    if not raw_value:
+        return ids
+
     for item in raw_value.split(","):
-        value = item.strip()
+        value = item.strip().strip("\"'").strip()
         if not value:
             continue
         try:
@@ -96,3 +108,29 @@ def _parse_booker_ids(raw_value: str) -> set[int]:
         except ValueError as error:
             raise RuntimeError("BOOKER_IDS должен содержать Telegram ID через запятую.") from error
     return ids
+
+
+def _parse_duty_cutoff_hour(raw_value: str | None) -> int:
+    value = (raw_value or str(DEFAULT_DUTY_CUTOFF_HOUR)).strip().strip("\"'").strip()
+    try:
+        hour = int(value)
+    except ValueError as error:
+        raise RuntimeError("DUTY_CUTOFF_HOUR должен быть целым числом от 0 до 23.") from error
+
+    if hour < 0 or hour > 23:
+        raise RuntimeError("DUTY_CUTOFF_HOUR должен быть целым числом от 0 до 23.")
+
+    return hour
+
+
+def _parse_app_timezone(raw_value: str | None) -> str:
+    value = (raw_value or DEFAULT_APP_TIMEZONE).strip().strip("\"'").strip()
+    if not value:
+        value = DEFAULT_APP_TIMEZONE
+
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as error:
+        raise RuntimeError(f"APP_TIMEZONE содержит неизвестный часовой пояс: {value}") from error
+
+    return value
