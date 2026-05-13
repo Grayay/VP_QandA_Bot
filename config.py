@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 FAQ_FILE = BASE_DIR / "Вопросы.xlsx"
 DB_FILE = BASE_DIR / "bot.sqlite3"
-DEFAULT_DUTY_CUTOFF_HOUR = 21
+DEFAULT_DUTY_CUTOFF_HOUR = 19
 DEFAULT_APP_TIMEZONE = "Europe/Moscow"
 
 CASTINGS_SECTION = "Кастинги/букинги/съемки"
@@ -22,7 +22,7 @@ SECTION_KEYS = {
 
 SECTION_TO_KEY = {section: key for key, section in SECTION_KEYS.items()}
 
-NO_ANSWER_BUTTON_TEXT = "Не нашла ответ на нужный вопрос"
+NO_ANSWER_BUTTON_TEXT = "Не получилось найти ответ"
 
 CONTACTS = [
     {

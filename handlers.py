@@ -228,6 +228,13 @@ def create_router(
 
         await callback.answer()
         if callback.message:
+            if _is_booker_not_answering_question(item.question):
+                await callback.message.edit_text(
+                    _contacts_text(),
+                    reply_markup=home_keyboard(),
+                )
+                return
+
             await _send_long_message(
                 callback.message,
                 item.answer,
@@ -259,7 +266,7 @@ def create_router(
 
         if callback.message:
             await callback.message.answer(
-                "Напишите ваш вопрос одним сообщением. Я сохраню его и передам дежурному букеру, если он назначен.",
+                "Напишите свой вопрос одним сообщением.",
                 reply_markup=home_keyboard(),
             )
 
@@ -297,7 +304,7 @@ def create_router(
 
         if after_cutoff:
             await message.answer(
-                "Вопрос сохранён. После 21:00 такие вопросы передаются дежурному букеру следующего дня.",
+                "Вопрос сохранён. После 19:00 такие вопросы передаются дежурному букеру следующего дня.",
                 reply_markup=home_keyboard(),
             )
             return
@@ -627,6 +634,11 @@ async def _ensure_booker_callback(
 
 def _is_authorized_booker(user: User | None, authorized_booker_ids: set[int]) -> bool:
     return bool(user and user.id in authorized_booker_ids)
+
+
+def _is_booker_not_answering_question(question: str) -> bool:
+    normalized = question.lower().replace("ё", "е")
+    return "букер" in normalized and "не отвечает" in normalized
 
 
 def resolve_duty_sections(faq: FAQData) -> dict[str, str]:
