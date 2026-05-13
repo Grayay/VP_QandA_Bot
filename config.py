@@ -64,7 +64,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
-    load_dotenv(BASE_DIR / ".env")
+    load_dotenv(BASE_DIR / ".env", override=True)
 
     bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
@@ -100,7 +100,7 @@ def _parse_booker_ids(raw_value: str | None) -> set[int]:
         return ids
 
     for item in raw_value.split(","):
-        value = item.strip().strip("\"'").strip()
+        value = item.strip().strip("\ufeff").strip("\"'").strip()
         if not value:
             continue
         try:

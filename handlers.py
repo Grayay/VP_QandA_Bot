@@ -27,6 +27,11 @@ from keyboards import (
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 NO_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к панели букера."
 PENDING_CHECK_INTERVAL_SECONDS = 300
+WELCOME_MESSAGE = (
+    "Привет! Я — VP-бот 🤍\n"
+    "Помогу быстро найти ответ на вопрос или понять, к кому обратиться.\n\n"
+    "Выбери нужный раздел ниже:"
+)
 LOGGER = logging.getLogger(__name__)
 _PENDING_FORWARD_LOCK = asyncio.Lock()
 
@@ -49,7 +54,7 @@ def create_router(
     async def start(message: Message, state: FSMContext) -> None:
         await state.clear()
         await message.answer(
-            "Здравствуйте! Выберите раздел, чтобы найти ответ на вопрос.",
+            WELCOME_MESSAGE,
             reply_markup=main_menu_keyboard(
                 faq.sections,
                 is_booker=_is_authorized_booker(message.from_user, authorized_booker_ids),
@@ -63,6 +68,23 @@ def create_router(
             return
 
         await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
+
+    @router.message(Command("booker_debug"))
+    async def booker_debug(message: Message) -> None:
+        user_id = message.from_user.id if message.from_user else None
+        is_authorized = _is_authorized_booker(message.from_user, authorized_booker_ids)
+        user_id_text = str(user_id) if user_id is not None else "не удалось определить"
+        status_text = "да" if is_authorized else "нет"
+
+        await message.answer(
+            "\n".join(
+                [
+                    f"Ваш Telegram ID: {user_id_text}",
+                    f"Вы авторизованы как букер: {status_text}",
+                    f"Загружено BOOKER_IDS: {len(authorized_booker_ids)}",
+                ]
+            )
+        )
 
     @router.message(Command("duty_castings"))
     async def duty_castings(message: Message, bot: Bot) -> None:
