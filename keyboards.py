@@ -10,12 +10,17 @@ from faq_loader import FAQItem
 def main_menu_keyboard(
     sections: list[str],
     *,
+    section_indexes: list[int] | None = None,
+    root_questions: list[FAQItem] | None = None,
     is_booker: bool = False,
     is_chief_booker: bool = False,
 ) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    for index, section in enumerate(sections):
+    indexes = section_indexes or list(range(len(sections)))
+    for index, section in zip(indexes, sections):
         builder.button(text=section, callback_data=f"section:{index}")
+    for item in root_questions or []:
+        builder.button(text=item.question, callback_data=f"question:{item.token}")
     if is_booker:
         builder.button(text="Панель букера", callback_data="booker_panel")
     if is_chief_booker:

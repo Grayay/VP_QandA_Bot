@@ -7,7 +7,8 @@ import unittest
 from openpyxl import Workbook
 
 from database import Database
-from handlers import _is_chief_booker
+from faq_loader import FAQData
+from handlers import WELCOME_MESSAGE, _is_chief_booker, root_faq_menu_parts
 from keyboards import main_menu_keyboard
 from scripts.import_faq_from_excel import import_faq_from_excel
 
@@ -81,6 +82,99 @@ class FAQTests(unittest.TestCase):
         self.assertNotIn("С кем связаться", texts)
         self.assertFalse(_is_chief_booker(UserStub(1), {2}))
 
+    def test_start_welcome_message_matches_expected_text(self) -> None:
+        self.assertEqual(
+            WELCOME_MESSAGE,
+            (
+                "Привет!\n"
+                "Я - VPбот, и сегодня я постараюсь помочь тебе оперативно\n"
+                "решить твои вопросы🤍\n"
+                "Что тебе хотелось бы узнать?"
+            ),
+        )
+
+    def test_flattened_sections_are_root_question_buttons(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(Path(tmp_dir) / "bot.sqlite3")
+            db.init()
+            normal = db.create_faq_entry(
+                question="Вопрос внутри раздела",
+                answer="Ответ внутри раздела",
+                section="Снепы",
+            )
+            children = db.create_faq_entry(
+                question="Дети",
+                answer="Ответ про детей",
+                section="Общий раздел + Дополнительный доход",
+            )
+            hours = db.create_faq_entry(
+                question="Часы работы букеров",
+                answer="Ответ про часы",
+                section="Общий раздел",
+            )
+            deleted = db.create_faq_entry(
+                question="Скрытый вопрос",
+                answer="Скрытый ответ",
+                section="Общий раздел",
+            )
+            db.soft_delete_faq_entry(deleted.id)
+
+            faq = db.get_active_faq_data()
+            sections, section_indexes, root_questions = root_faq_menu_parts(faq)
+            markup = main_menu_keyboard(
+                sections,
+                section_indexes=section_indexes,
+                root_questions=root_questions,
+                is_chief_booker=False,
+            )
+            texts = [button.text for row in markup.inline_keyboard for button in row]
+            callback_by_text = {
+                button.text: button.callback_data
+                for row in markup.inline_keyboard
+                for button in row
+            }
+
+            self.assertIn("Снепы", texts)
+            self.assertNotIn("Общий раздел", texts)
+            self.assertNotIn("Общий раздел + Дополнительный доход", texts)
+            self.assertIn("Дети", texts)
+            self.assertIn("Часы работы букеров", texts)
+            self.assertNotIn("Скрытый вопрос", texts)
+            self.assertEqual(callback_by_text["Снепы"], f"section:{faq.sections.index('Снепы')}")
+            self.assertEqual(callback_by_text["Дети"], f"question:{children.token}")
+            self.assertEqual(callback_by_text["Часы работы букеров"], f"question:{hours.token}")
+            self.assertEqual(db.get_faq_entry_by_token(children.token).answer, "Ответ про детей")
+            self.assertEqual(db.get_faq_entry_by_token(hours.token).answer, "Ответ про часы")
+            self.assertEqual(faq.by_section["Снепы"][0].id, normal.id)
+
+    def test_chief_booker_still_gets_management_control(self) -> None:
+        faq = self._faq_data_with_flattened_sections()
+        sections, section_indexes, root_questions = root_faq_menu_parts(faq)
+        markup = main_menu_keyboard(
+            sections,
+            section_indexes=section_indexes,
+            root_questions=root_questions,
+            is_booker=False,
+            is_chief_booker=True,
+        )
+        texts = [button.text for row in markup.inline_keyboard for button in row]
+
+        self.assertIn("⚙️ Управление вопросами", texts)
+
+    def test_normal_user_does_not_get_management_control_on_flattened_menu(self) -> None:
+        faq = self._faq_data_with_flattened_sections()
+        sections, section_indexes, root_questions = root_faq_menu_parts(faq)
+        markup = main_menu_keyboard(
+            sections,
+            section_indexes=section_indexes,
+            root_questions=root_questions,
+            is_booker=False,
+            is_chief_booker=False,
+        )
+        texts = [button.text for row in markup.inline_keyboard for button in row]
+
+        self.assertNotIn("⚙️ Управление вопросами", texts)
+
     def test_chief_can_add_edit_and_soft_delete_faq_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             db = Database(Path(tmp_dir) / "bot.sqlite3")
@@ -136,6 +230,23 @@ class FAQTests(unittest.TestCase):
         sheet.append([None, None, None, None])
         workbook.save(path)
         workbook.close()
+
+    @staticmethod
+    def _faq_data_with_flattened_sections() -> FAQData:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(Path(tmp_dir) / "bot.sqlite3")
+            db.init()
+            db.create_faq_entry(
+                question="Разделенный вопрос",
+                answer="Разделенный ответ",
+                section="Снепы",
+            )
+            db.create_faq_entry(
+                question="Дети",
+                answer="Ответ про детей",
+                section="Общий раздел",
+            )
+            return db.get_active_faq_data()
 
 
 if __name__ == "__main__":

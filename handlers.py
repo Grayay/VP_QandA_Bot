@@ -36,10 +36,16 @@ MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 NO_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к панели букера."
 NO_CHIEF_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к управлению вопросами."
 PENDING_CHECK_INTERVAL_SECONDS = 300
+FLATTEN_FAQ_SECTIONS = {
+    "Общий раздел",
+    "Общий раздел + Дополнительный доход",
+    "Общий раздел + Дополнительный доход для моделей",
+}
 WELCOME_MESSAGE = (
-    "Привет! Я — VP-бот 🤍\n"
-    "Помогу быстро найти ответ на вопрос или понять, к кому обратиться.\n\n"
-    "Выбери нужный раздел ниже:"
+    "Привет!\n"
+    "Я - VPбот, и сегодня я постараюсь помочь тебе оперативно\n"
+    "решить твои вопросы🤍\n"
+    "Что тебе хотелось бы узнать?"
 )
 LOGGER = logging.getLogger(__name__)
 _PENDING_FORWARD_LOCK = asyncio.Lock()
@@ -79,6 +85,16 @@ def create_router(
 
     def current_faq() -> FAQData:
         return database.get_active_faq_data()
+
+    def main_menu_markup(faq_data: FAQData, user: User | None):
+        sections, section_indexes, root_questions = root_faq_menu_parts(faq_data)
+        return main_menu_keyboard(
+            sections,
+            section_indexes=section_indexes,
+            root_questions=root_questions,
+            is_booker=_is_authorized_booker(user, authorized_booker_ids),
+            is_chief_booker=_is_chief_booker(user, chief_booker_ids),
+        )
 
     async def show_faq_management_menu(
         callback: CallbackQuery,
@@ -155,11 +171,7 @@ def create_router(
         faq_data = current_faq()
         await message.answer(
             WELCOME_MESSAGE,
-            reply_markup=main_menu_keyboard(
-                faq_data.sections,
-                is_booker=_is_authorized_booker(message.from_user, authorized_booker_ids),
-                is_chief_booker=_is_chief_booker(message.from_user, chief_booker_ids),
-            ),
+            reply_markup=main_menu_markup(faq_data, message.from_user),
         )
 
     @router.message(Command("my_id"))
@@ -241,17 +253,7 @@ def create_router(
         if callback.message:
             await callback.message.edit_text(
                 "Выберите раздел, чтобы найти ответ на вопрос.",
-                reply_markup=main_menu_keyboard(
-                    faq_data.sections,
-                    is_booker=_is_authorized_booker(
-                        callback.from_user,
-                        authorized_booker_ids,
-                    ),
-                    is_chief_booker=_is_chief_booker(
-                        callback.from_user,
-                        chief_booker_ids,
-                    ),
-                ),
+                reply_markup=main_menu_markup(faq_data, callback.from_user),
             )
 
     @router.callback_query(F.data == "booker_panel")
@@ -1202,6 +1204,35 @@ def _is_chief_booker(user: User | None, chief_booker_ids: set[int]) -> bool:
 def _is_booker_not_answering_question(question: str) -> bool:
     normalized = question.lower().replace("ё", "е")
     return "букер" in normalized and "не отвечает" in normalized
+
+
+def root_faq_menu_parts(faq: FAQData) -> tuple[list[str], list[int], list[FAQItem]]:
+    sections: list[str] = []
+    section_indexes: list[int] = []
+    root_questions: list[FAQItem] = []
+
+    for section_index, section in enumerate(faq.sections):
+        questions = faq.by_section.get(section, [])
+        if _is_flattened_faq_section(section):
+            root_questions.extend(questions)
+            continue
+
+        sections.append(section)
+        section_indexes.append(section_index)
+
+    return sections, section_indexes, root_questions
+
+
+def _is_flattened_faq_section(section: str) -> bool:
+    normalized = _normalize_faq_section(section)
+    return any(
+        normalized == _normalize_faq_section(flattened_section)
+        for flattened_section in FLATTEN_FAQ_SECTIONS
+    )
+
+
+def _normalize_faq_section(section: str) -> str:
+    return " ".join(section.strip().lower().replace("ё", "е").split())
 
 
 def resolve_duty_sections(faq: FAQData) -> dict[str, str]:
