@@ -57,6 +57,7 @@ CONTACTS = [
 class Settings:
     bot_token: str
     booker_ids: set[int]
+    chief_booker_ids: set[int]
     duty_cutoff_hour: int = DEFAULT_DUTY_CUTOFF_HOUR
     app_timezone: str = DEFAULT_APP_TIMEZONE
     faq_file: Path = FAQ_FILE
@@ -73,6 +74,7 @@ def load_settings() -> Settings:
     return Settings(
         bot_token=bot_token,
         booker_ids=_parse_booker_ids(os.getenv("BOOKER_IDS", "")),
+        chief_booker_ids=_parse_booker_ids(os.getenv("CHIEF_BOOKER_IDS", "")),
         duty_cutoff_hour=_parse_duty_cutoff_hour(
             os.getenv("DUTY_CUTOFF_HOUR", str(DEFAULT_DUTY_CUTOFF_HOUR))
         ),

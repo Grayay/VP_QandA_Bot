@@ -5,7 +5,6 @@ from aiogram import Bot, Dispatcher
 
 from config import load_settings
 from database import Database
-from faq_loader import FAQLoaderError, load_faq
 from handlers import (
     create_router,
     forward_pending_after_cutoff_questions,
@@ -22,17 +21,22 @@ async def main() -> None:
 
     try:
         settings = load_settings()
-        faq = load_faq(settings.faq_file)
-    except (RuntimeError, FAQLoaderError) as error:
+    except RuntimeError as error:
         logging.error("%s", error)
         return
 
     logging.info("Загружено авторизованных BOOKER_IDS: %s", len(settings.booker_ids))
+    logging.info("Загружено CHIEF_BOOKER_IDS: %s", len(settings.chief_booker_ids))
     if not settings.booker_ids:
         logging.warning("BOOKER_IDS пустой. Панель букера не будет доступна никому.")
 
     database = Database(settings.db_file)
     database.init()
+    faq = database.get_active_faq_data()
+    if not faq.items:
+        logging.warning(
+            "В базе нет активных FAQ-вопросов. Импортируйте Excel через scripts/import_faq_from_excel.py."
+        )
     duty_sections = resolve_duty_sections(faq)
 
     bot = Bot(token=settings.bot_token)
@@ -42,6 +46,7 @@ async def main() -> None:
             faq=faq,
             database=database,
             authorized_booker_ids=settings.booker_ids,
+            chief_booker_ids=settings.chief_booker_ids,
             duty_cutoff_hour=settings.duty_cutoff_hour,
             app_timezone=settings.app_timezone,
         )

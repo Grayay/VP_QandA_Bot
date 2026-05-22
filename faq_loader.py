@@ -8,7 +8,9 @@ from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
 
 
-REQUIRED_COLUMNS = ("Вопрос", "Ответ", "Раздел")
+REQUIRED_COLUMNS = ("Вопрос", "Ответ", "Отдел", "Раздел")
+EMPTY_SECTION_TITLE = "Без раздела"
+TRANSFER_TO_BOOKER_ANSWER = "Перевести на букера"
 
 
 class FAQLoaderError(RuntimeError):
@@ -18,9 +20,11 @@ class FAQLoaderError(RuntimeError):
 @dataclass(frozen=True)
 class FAQItem:
     id: int
+    token: str
     question: str
     answer: str
-    section: str
+    department: str | None
+    section: str | None
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class FAQData:
     sections: list[str]
     by_section: dict[str, list[FAQItem]]
     by_id: dict[int, FAQItem]
+    skipped_rows: int = 0
 
 
 def load_faq(path: Path) -> FAQData:
@@ -54,32 +59,38 @@ def load_faq(path: Path) -> FAQData:
         items: list[FAQItem] = []
         sections: list[str] = []
         by_section: dict[str, list[FAQItem]] = {}
+        skipped_rows = 0
 
         for row_number, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
             question = _get_value(row, column_index["Вопрос"])
             answer = _get_value(row, column_index["Ответ"])
+            department = _get_value(row, column_index["Отдел"])
             section = _get_value(row, column_index["Раздел"])
 
-            if not question and not answer and not section:
+            if not question and not answer and not department and not section:
+                skipped_rows += 1
                 continue
 
-            if not question or not answer or not section:
+            if not question or not answer:
                 raise FAQLoaderError(
-                    f"В строке {row_number} должны быть заполнены Вопрос, Ответ и Раздел."
+                    f"В строке {row_number} должны быть заполнены Вопрос и Ответ."
                 )
 
             item = FAQItem(
                 id=len(items) + 1,
+                token=str(len(items) + 1),
                 question=question,
                 answer=answer,
-                section=section,
+                department=department or None,
+                section=section or None,
             )
             items.append(item)
 
-            if section not in by_section:
-                by_section[section] = []
-                sections.append(section)
-            by_section[section].append(item)
+            section_title = section_title_for_value(section)
+            if section_title not in by_section:
+                by_section[section_title] = []
+                sections.append(section_title)
+            by_section[section_title].append(item)
 
         if not items:
             raise FAQLoaderError("В Excel-файле нет FAQ-вопросов.")
@@ -89,6 +100,7 @@ def load_faq(path: Path) -> FAQData:
             sections=sections,
             by_section=by_section,
             by_id={item.id: item for item in items},
+            skipped_rows=skipped_rows,
         )
     finally:
         workbook.close()
@@ -99,16 +111,10 @@ def _validate_headers(headers: list[str]) -> None:
     actual = set(headers)
 
     missing = expected - actual
-    extra = actual - expected
 
-    if missing or extra or len(headers) != len(REQUIRED_COLUMNS):
+    if missing:
         details = []
-        if missing:
-            details.append("нет колонок: " + ", ".join(sorted(missing)))
-        if extra:
-            details.append("лишние колонки: " + ", ".join(sorted(extra)))
-        if len(headers) != len(REQUIRED_COLUMNS) and not details:
-            details.append("колонки должны быть ровно: " + ", ".join(REQUIRED_COLUMNS))
+        details.append("нет колонок: " + ", ".join(sorted(missing)))
         raise FAQLoaderError("Неверные колонки в Excel-файле: " + "; ".join(details))
 
 
@@ -128,3 +134,14 @@ def _trim_empty_tail(values: list[str]) -> list[str]:
     while values and not values[-1]:
         values.pop()
     return values
+
+
+def section_title_for_value(section: str | None) -> str:
+    value = (section or "").strip()
+    return value or EMPTY_SECTION_TITLE
+
+
+def is_transfer_to_booker_answer(answer: str) -> bool:
+    normalized = answer.strip().lower().replace("ё", "е")
+    expected = TRANSFER_TO_BOOKER_ANSWER.lower().replace("ё", "е")
+    return normalized == expected
