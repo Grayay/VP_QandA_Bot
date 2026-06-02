@@ -9,7 +9,7 @@ from openpyxl import Workbook
 from database import Database
 from faq_loader import FAQData
 from handlers import WELCOME_MESSAGE, _is_chief_booker, root_faq_menu_parts
-from keyboards import main_menu_keyboard
+from keyboards import booker_panel_keyboard, main_menu_keyboard
 from scripts.import_faq_from_excel import import_faq_from_excel
 
 
@@ -174,6 +174,18 @@ class FAQTests(unittest.TestCase):
         texts = [button.text for row in markup.inline_keyboard for button in row]
 
         self.assertNotIn("⚙️ Управление вопросами", texts)
+
+    def test_booker_panel_shows_single_unified_duty_button(self) -> None:
+        markup = booker_panel_keyboard()
+        texts = [button.text for row in markup.inline_keyboard for button in row]
+        callbacks = [button.callback_data for row in markup.inline_keyboard for button in row]
+
+        self.assertIn("Стать дежурным букером", texts)
+        self.assertIn("Текущие дежурные", texts)
+        self.assertIn("⬅️ Назад", texts)
+        self.assertNotIn("Стать дежурным по кастингам", texts)
+        self.assertNotIn("Стать дежурным по доп. доходу", texts)
+        self.assertIn("booker:duty_general", callbacks)
 
     def test_chief_can_add_edit_and_soft_delete_faq_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

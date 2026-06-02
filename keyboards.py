@@ -66,8 +66,7 @@ def home_keyboard() -> InlineKeyboardMarkup:
 
 def booker_panel_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="Стать дежурным по кастингам", callback_data="booker:duty_castings")
-    builder.button(text="Стать дежурным по доп. доходу", callback_data="booker:duty_income")
+    builder.button(text="Стать дежурным букером", callback_data="booker:duty_general")
     builder.button(text="Текущие дежурные", callback_data="booker:status")
     builder.button(text="⬅️ Назад", callback_data="main_menu")
     builder.adjust(1)

@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message, User
 
-from config import CONTACTS, SECTION_KEYS, section_key_for_section
+from config import CONTACTS
 from database import Database
 from faq_loader import FAQData, FAQItem, is_transfer_to_booker_answer
 from keyboards import (
@@ -40,6 +40,8 @@ PENDING_CHECK_INTERVAL_SECONDS = 300
 QUESTION_QUEUED_MESSAGE = "Спасибо! Вопрос сохранён. Букер ответит, когда будет на связи."
 QUESTION_SENT_TO_BOOKER_MESSAGE = "Вопрос передан дежурному букеру."
 SENT_TO_BOOKER_STATUSES = {"sent_to_booker", "forwarded"}
+GENERAL_DUTY_SECTION_KEY = "general"
+GENERAL_DUTY_SECTION = "Общие вопросы"
 FLATTEN_FAQ_SECTIONS = {
     "Общий раздел",
     "Общий раздел + Дополнительный доход",
@@ -103,7 +105,7 @@ def create_router(
             sections,
             section_indexes=section_indexes,
             root_questions=root_questions,
-            is_booker=_is_authorized_booker(user, authorized_booker_ids),
+            is_booker=_is_authorized_booker_or_chief(user, authorized_booker_ids, chief_booker_ids),
             is_chief_booker=_is_chief_booker(user, chief_booker_ids),
         )
 
@@ -214,9 +216,9 @@ def create_router(
             )
         )
 
-    @router.message(Command("duty_castings"))
-    async def duty_castings(message: Message, bot: Bot) -> None:
-        if not _is_authorized_booker(message.from_user, authorized_booker_ids):
+    @router.message(Command("duty"))
+    async def duty(message: Message, bot: Bot) -> None:
+        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
             await message.answer(NO_BOOKER_ACCESS_MESSAGE)
             return
 
@@ -224,37 +226,26 @@ def create_router(
             bot=bot,
             message=message,
             database=database,
-            section_key="castings",
-            section=duty_sections["castings"],
+            section_key=GENERAL_DUTY_SECTION_KEY,
+            section=GENERAL_DUTY_SECTION,
             duty_sections=duty_sections,
             app_timezone=app_timezone,
             workday_start_hour=workday_start_hour,
             workday_end_hour=workday_end_hour,
             workdays=workdays,
         )
+
+    @router.message(Command("duty_castings"))
+    async def duty_castings(message: Message, bot: Bot) -> None:
+        await duty(message, bot)
 
     @router.message(Command("duty_income"))
     async def duty_income(message: Message, bot: Bot) -> None:
-        if not _is_authorized_booker(message.from_user, authorized_booker_ids):
-            await message.answer(NO_BOOKER_ACCESS_MESSAGE)
-            return
-
-        await _set_duty(
-            bot=bot,
-            message=message,
-            database=database,
-            section_key="income",
-            section=duty_sections["income"],
-            duty_sections=duty_sections,
-            app_timezone=app_timezone,
-            workday_start_hour=workday_start_hour,
-            workday_end_hour=workday_end_hour,
-            workdays=workdays,
-        )
+        await duty(message, bot)
 
     @router.message(Command("duty_status"))
     async def duty_status(message: Message) -> None:
-        if not _is_authorized_booker(message.from_user, authorized_booker_ids):
+        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
             await message.answer(NO_BOOKER_ACCESS_MESSAGE)
             return
 
@@ -273,7 +264,7 @@ def create_router(
 
     @router.callback_query(F.data == "booker_panel")
     async def booker_panel(callback: CallbackQuery) -> None:
-        if not await _ensure_booker_callback(callback, authorized_booker_ids):
+        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
             return
 
         if callback.message:
@@ -282,17 +273,17 @@ def create_router(
                 reply_markup=booker_panel_keyboard(),
             )
 
-    @router.callback_query(F.data == "booker:duty_castings")
-    async def booker_duty_castings(callback: CallbackQuery, bot: Bot) -> None:
-        if not await _ensure_booker_callback(callback, authorized_booker_ids):
+    @router.callback_query(F.data == "booker:duty_general")
+    async def booker_duty_general(callback: CallbackQuery, bot: Bot) -> None:
+        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
             return
 
         if callback.message:
             text = _set_duty_for_user(
                 database=database,
                 user=callback.from_user,
-                section_key="castings",
-                section=duty_sections["castings"],
+                section_key=GENERAL_DUTY_SECTION_KEY,
+                section=GENERAL_DUTY_SECTION,
                 app_timezone=app_timezone,
             )
             await flush_pending_questions_to_booker(
@@ -303,21 +294,20 @@ def create_router(
                 workday_start_hour=workday_start_hour,
                 workday_end_hour=workday_end_hour,
                 workdays=workdays,
-                section_keys={"castings"},
             )
             await callback.message.edit_text(text, reply_markup=booker_panel_keyboard())
 
     @router.callback_query(F.data == "booker:duty_income")
-    async def booker_duty_income(callback: CallbackQuery, bot: Bot) -> None:
-        if not await _ensure_booker_callback(callback, authorized_booker_ids):
+    async def booker_duty_income_legacy(callback: CallbackQuery, bot: Bot) -> None:
+        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
             return
 
         if callback.message:
             text = _set_duty_for_user(
                 database=database,
                 user=callback.from_user,
-                section_key="income",
-                section=duty_sections["income"],
+                section_key=GENERAL_DUTY_SECTION_KEY,
+                section=GENERAL_DUTY_SECTION,
                 app_timezone=app_timezone,
             )
             await flush_pending_questions_to_booker(
@@ -328,13 +318,16 @@ def create_router(
                 workday_start_hour=workday_start_hour,
                 workday_end_hour=workday_end_hour,
                 workdays=workdays,
-                section_keys={"income"},
             )
             await callback.message.edit_text(text, reply_markup=booker_panel_keyboard())
 
+    @router.callback_query(F.data == "booker:duty_castings")
+    async def booker_duty_castings_legacy(callback: CallbackQuery, bot: Bot) -> None:
+        await booker_duty_income_legacy(callback, bot)
+
     @router.callback_query(F.data == "booker:status")
     async def booker_status(callback: CallbackQuery) -> None:
-        if not await _ensure_booker_callback(callback, authorized_booker_ids):
+        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
             return
 
         if callback.message:
@@ -787,7 +780,7 @@ def create_router(
             workday_end_hour=workday_end_hour,
             workdays=workdays,
         )
-        duty = database.get_duty_booker(section_key)
+        duty = database.get_duty_booker(GENERAL_DUTY_SECTION_KEY)
         active_duty = _active_duty_booker(
             duty=duty,
             now=now,
@@ -889,7 +882,11 @@ def create_router(
             return
 
         try:
-            await bot.send_message(chat_id=int(question["user_id"]), text=answer)
+            await _send_model_answer_messages(
+                bot=bot,
+                chat_id=int(question["user_id"]),
+                answer=answer,
+            )
         except TelegramAPIError as error:
             LOGGER.exception("Не удалось отправить ответ по вопросу %s модели.", question_id)
             database.mark_question_failed(
@@ -920,6 +917,11 @@ def create_router(
         await message.answer("Нажмите /start, чтобы открыть меню FAQ.")
 
     return router
+
+
+async def _send_model_answer_messages(*, bot: Bot, chat_id: int, answer: str) -> None:
+    await bot.send_message(chat_id=chat_id, text="Ответ на ваш вопрос:")
+    await bot.send_message(chat_id=chat_id, text=answer)
 
 
 async def _set_duty(
@@ -957,7 +959,6 @@ async def _set_duty(
         workday_start_hour=workday_start_hour,
         workday_end_hour=workday_end_hour,
         workdays=workdays,
-        section_keys={section_key},
     )
 
 
@@ -977,21 +978,15 @@ def _set_duty_for_user(
         full_name=_full_name(user),
         updated_at=_datetime_to_storage(_now(app_timezone)),
     )
-    return f"Готово! Вы назначены дежурным букером для раздела «{section}»."
+    return "Готово! Вы назначены дежурным букером."
 
 
 def _duty_status_text(database: Database, duty_sections: dict[str, str]) -> str:
-    duties = database.get_all_duty_bookers()
-    lines = ["Текущие дежурные букеры:"]
+    duty = database.get_duty_booker(GENERAL_DUTY_SECTION_KEY)
+    if not duty:
+        return "Сейчас дежурный букер не назначен."
 
-    for section_key, section in duty_sections.items():
-        duty = duties.get(section_key)
-        if duty:
-            lines.append(f"• {section}: {_format_user(duty)}")
-        else:
-            lines.append(f"• {section}: не назначен")
-
-    return "\n".join(lines)
+    return f"Текущий дежурный букер:\n{_format_user(duty)}"
 
 
 def _contacts_text() -> str:
@@ -1010,25 +1005,12 @@ async def _start_custom_question_flow(
 ) -> None:
     routing_section = section or (item.section if item else None) or ""
     routing_department = item.department if item else None
-    section_key = section_key_for_section(routing_section)
-    if not section_key and routing_department:
-        section_key = section_key_for_section(routing_department)
-
-    if not section_key:
-        await state.clear()
-        await callback.answer()
-        if callback.message:
-            await callback.message.edit_text(
-                _contacts_text(),
-                reply_markup=home_keyboard(),
-            )
-        return
 
     await callback.answer()
     await state.set_state(QuestionState.waiting_for_question)
     await state.update_data(
-        section_key=section_key,
-        section=routing_section or routing_department or "FAQ",
+        section_key=GENERAL_DUTY_SECTION_KEY,
+        section=routing_section or routing_department or GENERAL_DUTY_SECTION,
     )
 
     if callback.message:
@@ -1188,26 +1170,21 @@ async def flush_pending_questions_to_booker(
         ):
             return 0
 
-        duties = database.get_all_duty_bookers()
-        questions = database.get_pending_assignment_questions(section_keys=section_keys)
+        duty = _active_duty_booker(
+            duty=database.get_duty_booker(GENERAL_DUTY_SECTION_KEY),
+            now=now,
+            app_timezone=app_timezone,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
+        )
+        if not duty:
+            return 0
+
+        questions = database.get_pending_assignment_questions()
         forwarded_count = 0
 
         for question in questions:
-            section_key = str(question["section_key"])
-            if section_key not in duty_sections:
-                continue
-
-            duty = _active_duty_booker(
-                duty=duties.get(section_key),
-                now=now,
-                app_timezone=app_timezone,
-                workday_start_hour=workday_start_hour,
-                workday_end_hour=workday_end_hour,
-                workdays=workdays,
-            )
-            if not duty:
-                continue
-
             try:
                 await bot.send_message(
                     chat_id=int(duty["user_id"]),
@@ -1512,19 +1489,7 @@ def _normalize_faq_section(section: str) -> str:
 
 
 def resolve_duty_sections(faq: FAQData) -> dict[str, str]:
-    sections = dict(SECTION_KEYS)
-
-    for section_key, default_section in SECTION_KEYS.items():
-        if default_section in faq.sections:
-            sections[section_key] = default_section
-            continue
-
-        for section in faq.sections:
-            if section_key_for_section(section) == section_key:
-                sections[section_key] = section
-                break
-
-    return sections
+    return {GENERAL_DUTY_SECTION_KEY: GENERAL_DUTY_SECTION}
 
 
 def _full_name(user: User | None) -> str:

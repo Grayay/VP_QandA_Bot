@@ -10,9 +10,14 @@ from zoneinfo import ZoneInfo
 import handlers
 from database import Database
 from handlers import (
+    GENERAL_DUTY_SECTION,
+    GENERAL_DUTY_SECTION_KEY,
     _active_duty_booker,
+    _duty_status_text,
     _is_authorized_booker_or_chief,
     _reply_question_error,
+    _send_model_answer_messages,
+    _set_duty_for_user,
     flush_pending_questions_to_booker,
 )
 from keyboards import booker_reply_keyboard
@@ -31,8 +36,18 @@ class FakeBot:
 
 
 class UserStub:
-    def __init__(self, user_id: int) -> None:
+    def __init__(
+        self,
+        user_id: int,
+        *,
+        username: str | None = "booker",
+        first_name: str = "Booker",
+        last_name: str | None = None,
+    ) -> None:
         self.id = user_id
+        self.username = username
+        self.first_name = first_name
+        self.last_name = last_name
 
 
 class QuestionRoutingTests(unittest.TestCase):
@@ -96,6 +111,27 @@ class QuestionRoutingTests(unittest.TestCase):
             self.assertEqual(bot.sent_messages, [])
             self.assertEqual(db.get_question(question_id)["status"], "pending_assignment")
 
+    def test_set_unified_duty_booker_uses_general_row(self) -> None:
+        now = datetime(2026, 6, 2, 11, 0, tzinfo=ZoneInfo(APP_TIMEZONE))
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db = Database(Path(tmp_dir) / "bot.sqlite3")
+            db.init()
+
+            with self._fixed_now(now):
+                text = _set_duty_for_user(
+                    database=db,
+                    user=UserStub(42, username="new_booker", first_name="New", last_name="Booker"),
+                    section_key=GENERAL_DUTY_SECTION_KEY,
+                    section=GENERAL_DUTY_SECTION,
+                    app_timezone=APP_TIMEZONE,
+                )
+
+            duty = db.get_duty_booker(GENERAL_DUTY_SECTION_KEY)
+            self.assertEqual(text, "Готово! Вы назначены дежурным букером.")
+            self.assertEqual(duty["user_id"], 42)
+            self.assertEqual(duty["section_key"], GENERAL_DUTY_SECTION_KEY)
+            self.assertEqual(_duty_status_text(db, {}), "Текущий дежурный букер:\nNew Booker (@new_booker, ID: 42)")
+
     def test_fresh_duty_receives_pending_questions_fifo_once(self) -> None:
         now = datetime(2026, 6, 2, 11, 0, tzinfo=ZoneInfo(APP_TIMEZONE))
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -115,15 +151,15 @@ class QuestionRoutingTests(unittest.TestCase):
                 user_id=101,
                 username="second_model",
                 full_name="Second Model",
-                section_key="castings",
-                section="Кастинги",
+                section_key="income",
+                section="Дополнительный доход",
                 question="Second question",
                 created_at=(now - timedelta(days=1)).isoformat(),
                 after_cutoff=True,
             )
             db.set_duty_booker(
-                section_key="castings",
-                section="Кастинги",
+                section_key=GENERAL_DUTY_SECTION_KEY,
+                section=GENERAL_DUTY_SECTION,
                 user_id=42,
                 username="booker",
                 full_name="Booker",
@@ -170,6 +206,25 @@ class QuestionRoutingTests(unittest.TestCase):
 
         self.assertEqual(button.text, "Ответить модели")
         self.assertEqual(button.callback_data, "booker:reply:123")
+
+    def test_model_answer_is_sent_as_two_clean_messages(self) -> None:
+        bot = FakeBot()
+
+        asyncio.run(
+            _send_model_answer_messages(
+                bot=bot,
+                chat_id=100,
+                answer="Clean answer",
+            )
+        )
+
+        self.assertEqual(
+            bot.sent_messages,
+            [
+                {"chat_id": 100, "text": "Ответ на ваш вопрос:"},
+                {"chat_id": 100, "text": "Clean answer"},
+            ],
+        )
 
     def test_answered_and_failed_statuses_are_recorded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
