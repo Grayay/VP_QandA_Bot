@@ -11,6 +11,9 @@ FAQ_FILE = BASE_DIR / "Вопросы.xlsx"
 DB_FILE = BASE_DIR / "bot.sqlite3"
 DEFAULT_DUTY_CUTOFF_HOUR = 19
 DEFAULT_APP_TIMEZONE = "Europe/Moscow"
+DEFAULT_WORKDAY_START_HOUR = 10
+DEFAULT_WORKDAY_END_HOUR = DEFAULT_DUTY_CUTOFF_HOUR
+DEFAULT_WORKDAYS = frozenset({1, 2, 3, 4, 5})
 
 CASTINGS_SECTION = "Кастинги/букинги/съемки"
 INCOME_SECTION = "Дополнительный доход для моделей"
@@ -60,6 +63,9 @@ class Settings:
     chief_booker_ids: set[int]
     duty_cutoff_hour: int = DEFAULT_DUTY_CUTOFF_HOUR
     app_timezone: str = DEFAULT_APP_TIMEZONE
+    workday_start_hour: int = DEFAULT_WORKDAY_START_HOUR
+    workday_end_hour: int = DEFAULT_WORKDAY_END_HOUR
+    workdays: frozenset[int] = DEFAULT_WORKDAYS
     faq_file: Path = FAQ_FILE
     db_file: Path = DB_FILE
 
@@ -71,14 +77,28 @@ def load_settings() -> Settings:
     if not bot_token:
         raise RuntimeError("Не найден BOT_TOKEN. Создайте .env на основе .env.example.")
 
+    workday_end_hour = _parse_hour(
+        os.getenv("WORKDAY_END_HOUR", os.getenv("DUTY_CUTOFF_HOUR", str(DEFAULT_WORKDAY_END_HOUR))),
+        name="WORKDAY_END_HOUR",
+    )
+    workday_start_hour = _parse_hour(
+        os.getenv("WORKDAY_START_HOUR", str(DEFAULT_WORKDAY_START_HOUR)),
+        name="WORKDAY_START_HOUR",
+    )
+    if workday_start_hour >= workday_end_hour:
+        raise RuntimeError("WORKDAY_START_HOUR должен быть меньше WORKDAY_END_HOUR.")
+
     return Settings(
         bot_token=bot_token,
         booker_ids=_parse_booker_ids(os.getenv("BOOKER_IDS", "")),
         chief_booker_ids=_parse_booker_ids(os.getenv("CHIEF_BOOKER_IDS", "")),
-        duty_cutoff_hour=_parse_duty_cutoff_hour(
-            os.getenv("DUTY_CUTOFF_HOUR", str(DEFAULT_DUTY_CUTOFF_HOUR))
+        duty_cutoff_hour=workday_end_hour,
+        app_timezone=_parse_app_timezone(
+            os.getenv("WORKING_TIMEZONE", os.getenv("APP_TIMEZONE", DEFAULT_APP_TIMEZONE))
         ),
-        app_timezone=_parse_app_timezone(os.getenv("APP_TIMEZONE", DEFAULT_APP_TIMEZONE)),
+        workday_start_hour=workday_start_hour,
+        workday_end_hour=workday_end_hour,
+        workdays=_parse_workdays(os.getenv("WORKDAYS", ",".join(str(day) for day in sorted(DEFAULT_WORKDAYS)))),
     )
 
 
@@ -113,16 +133,44 @@ def _parse_booker_ids(raw_value: str | None) -> set[int]:
 
 
 def _parse_duty_cutoff_hour(raw_value: str | None) -> int:
-    value = (raw_value or str(DEFAULT_DUTY_CUTOFF_HOUR)).strip().strip("\"'").strip()
+    return _parse_hour(raw_value or str(DEFAULT_DUTY_CUTOFF_HOUR), name="DUTY_CUTOFF_HOUR")
+
+
+def _parse_hour(raw_value: str | None, *, name: str) -> int:
+    value = (raw_value or "").strip().strip("\"'").strip()
     try:
         hour = int(value)
     except ValueError as error:
-        raise RuntimeError("DUTY_CUTOFF_HOUR должен быть целым числом от 0 до 23.") from error
+        raise RuntimeError(f"{name} должен быть целым числом от 0 до 23.") from error
 
     if hour < 0 or hour > 23:
-        raise RuntimeError("DUTY_CUTOFF_HOUR должен быть целым числом от 0 до 23.")
+        raise RuntimeError(f"{name} должен быть целым числом от 0 до 23.")
 
     return hour
+
+
+def _parse_workdays(raw_value: str | None) -> frozenset[int]:
+    value = (raw_value or "").strip().strip("\"'").strip()
+    if not value:
+        return DEFAULT_WORKDAYS
+
+    days: set[int] = set()
+    for item in value.split(","):
+        cleaned = item.strip().strip("\"'").strip()
+        if not cleaned:
+            continue
+        try:
+            day = int(cleaned)
+        except ValueError as error:
+            raise RuntimeError("WORKDAYS должен содержать номера дней через запятую: 1=понедельник ... 7=воскресенье.") from error
+        if day < 1 or day > 7:
+            raise RuntimeError("WORKDAYS должен содержать номера дней от 1 до 7.")
+        days.add(day)
+
+    if not days:
+        return DEFAULT_WORKDAYS
+
+    return frozenset(days)
 
 
 def _parse_app_timezone(raw_value: str | None) -> str:

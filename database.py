@@ -30,14 +30,30 @@ class Database:
                     question TEXT NOT NULL,
                     question_text TEXT,
                     created_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'pending',
+                    status TEXT NOT NULL DEFAULT 'pending_assignment',
                     routed_to_booker_id INTEGER,
                     routed_at TEXT,
-                    after_cutoff INTEGER NOT NULL DEFAULT 0
+                    after_cutoff INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT,
+                    answered_at TEXT,
+                    answer_text TEXT,
+                    last_error TEXT
                 )
                 """
             )
             self._migrate_unanswered_questions(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_unanswered_questions_pending_assignment
+                ON unanswered_questions(status, section_key, created_at, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_unanswered_questions_routed
+                ON unanswered_questions(routed_to_booker_id, status, id)
+                """
+            )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS duty_bookers (
@@ -326,11 +342,12 @@ class Database:
         section: str,
         question: str,
         created_at: str | None = None,
-        status: str = "pending",
+        status: str = "pending_assignment",
         routed_to_booker_id: int | None = None,
         routed_at: str | None = None,
         after_cutoff: bool = False,
     ) -> int:
+        created_value = created_at or self._now()
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -346,9 +363,10 @@ class Database:
                     status,
                     routed_to_booker_id,
                     routed_at,
-                    after_cutoff
+                    after_cutoff,
+                    updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     user_id,
@@ -358,11 +376,12 @@ class Database:
                     section,
                     question,
                     question,
-                    created_at or self._now(),
+                    created_value,
                     status,
                     routed_to_booker_id,
                     routed_at,
                     int(after_cutoff),
+                    created_value,
                 ),
             )
             return int(cursor.lastrowid)
@@ -443,7 +462,7 @@ class Database:
                 routed_at,
                 after_cutoff
             FROM unanswered_questions
-            WHERE status = 'pending' AND after_cutoff = 1
+            WHERE status IN ('pending', 'pending_assignment') AND after_cutoff = 1
         """
         params: tuple[Any, ...] = ()
 
@@ -458,6 +477,73 @@ class Database:
             rows = connection.execute(query, params).fetchall()
             return [dict(row) for row in rows]
 
+    def get_pending_assignment_questions(
+        self,
+        *,
+        section_keys: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                id,
+                user_id,
+                username,
+                full_name,
+                section_key,
+                section,
+                COALESCE(question_text, question) AS question_text,
+                created_at,
+                updated_at,
+                status,
+                routed_to_booker_id,
+                routed_at,
+                after_cutoff,
+                answered_at,
+                answer_text,
+                last_error
+            FROM unanswered_questions
+            WHERE status IN ('pending', 'pending_assignment')
+        """
+        params: tuple[Any, ...] = ()
+
+        if section_keys:
+            placeholders = ", ".join("?" for _ in section_keys)
+            query += f" AND section_key IN ({placeholders})"
+            params = tuple(sorted(section_keys))
+
+        query += " ORDER BY created_at ASC, id ASC"
+
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_question(self, question_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    id,
+                    user_id,
+                    username,
+                    full_name,
+                    section_key,
+                    section,
+                    COALESCE(question_text, question) AS question_text,
+                    created_at,
+                    updated_at,
+                    status,
+                    routed_to_booker_id,
+                    routed_at,
+                    after_cutoff,
+                    answered_at,
+                    answer_text,
+                    last_error
+                FROM unanswered_questions
+                WHERE id = ?
+                """,
+                (question_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def mark_question_forwarded(
         self,
         *,
@@ -465,17 +551,97 @@ class Database:
         routed_to_booker_id: int,
         routed_at: str | None = None,
     ) -> None:
+        self.mark_question_sent_to_booker(
+            question_id=question_id,
+            booker_id=routed_to_booker_id,
+            sent_at=routed_at,
+        )
+
+    def mark_question_sent_to_booker(
+        self,
+        *,
+        question_id: int,
+        booker_id: int,
+        sent_at: str | None = None,
+    ) -> None:
+        sent_value = sent_at or self._now()
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE unanswered_questions
                 SET
-                    status = 'forwarded',
+                    status = 'sent_to_booker',
                     routed_to_booker_id = ?,
-                    routed_at = ?
+                    routed_at = ?,
+                    updated_at = ?,
+                    last_error = NULL
                 WHERE id = ?
                 """,
-                (routed_to_booker_id, routed_at or self._now(), question_id),
+                (booker_id, sent_value, sent_value, question_id),
+            )
+
+    def mark_question_answered(
+        self,
+        *,
+        question_id: int,
+        answer_text: str,
+        answered_at: str | None = None,
+    ) -> None:
+        answered_value = answered_at or self._now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE unanswered_questions
+                SET
+                    status = 'answered',
+                    answer_text = ?,
+                    answered_at = ?,
+                    updated_at = ?,
+                    last_error = NULL
+                WHERE id = ?
+                """,
+                (answer_text, answered_value, answered_value, question_id),
+            )
+
+    def mark_question_failed(
+        self,
+        *,
+        question_id: int,
+        error_details: str,
+        failed_at: str | None = None,
+    ) -> None:
+        failed_value = failed_at or self._now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE unanswered_questions
+                SET
+                    status = 'failed',
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (error_details, failed_value, question_id),
+            )
+
+    def remember_question_error(
+        self,
+        *,
+        question_id: int,
+        error_details: str,
+        updated_at: str | None = None,
+    ) -> None:
+        updated_value = updated_at or self._now()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE unanswered_questions
+                SET
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (error_details, updated_value, question_id),
             )
 
     def _migrate_unanswered_questions(self, connection: sqlite3.Connection) -> None:
@@ -498,6 +664,10 @@ class Database:
                 "ALTER TABLE unanswered_questions "
                 "ADD COLUMN after_cutoff INTEGER NOT NULL DEFAULT 0"
             ),
+            "updated_at": "ALTER TABLE unanswered_questions ADD COLUMN updated_at TEXT",
+            "answered_at": "ALTER TABLE unanswered_questions ADD COLUMN answered_at TEXT",
+            "answer_text": "ALTER TABLE unanswered_questions ADD COLUMN answer_text TEXT",
+            "last_error": "ALTER TABLE unanswered_questions ADD COLUMN last_error TEXT",
         }
 
         for column, statement in migrations.items():
@@ -509,6 +679,27 @@ class Database:
             UPDATE unanswered_questions
             SET question_text = question
             WHERE question_text IS NULL
+            """
+        )
+        connection.execute(
+            """
+            UPDATE unanswered_questions
+            SET updated_at = COALESCE(updated_at, routed_at, created_at)
+            WHERE updated_at IS NULL
+            """
+        )
+        connection.execute(
+            """
+            UPDATE unanswered_questions
+            SET status = 'pending_assignment'
+            WHERE status = 'pending'
+            """
+        )
+        connection.execute(
+            """
+            UPDATE unanswered_questions
+            SET status = 'sent_to_booker'
+            WHERE status = 'forwarded'
             """
         )
 

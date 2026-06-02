@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import datetime
 import logging
 from zoneinfo import ZoneInfo
 
@@ -18,6 +18,7 @@ from faq_loader import FAQData, FAQItem, is_transfer_to_booker_answer
 from keyboards import (
     answer_navigation_keyboard,
     booker_panel_keyboard,
+    booker_reply_keyboard,
     faq_add_confirm_keyboard,
     faq_add_step_keyboard,
     faq_delete_confirm_keyboard,
@@ -36,6 +37,9 @@ MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 NO_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к панели букера."
 NO_CHIEF_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к управлению вопросами."
 PENDING_CHECK_INTERVAL_SECONDS = 300
+QUESTION_QUEUED_MESSAGE = "Спасибо! Вопрос сохранён. Букер ответит, когда будет на связи."
+QUESTION_SENT_TO_BOOKER_MESSAGE = "Вопрос передан дежурному букеру."
+SENT_TO_BOOKER_STATUSES = {"sent_to_booker", "forwarded"}
 FLATTEN_FAQ_SECTIONS = {
     "Общий раздел",
     "Общий раздел + Дополнительный доход",
@@ -53,6 +57,10 @@ _PENDING_FORWARD_LOCK = asyncio.Lock()
 
 class QuestionState(StatesGroup):
     waiting_for_question = State()
+
+
+class BookerReplyState(StatesGroup):
+    waiting_for_answer = State()
 
 
 class FAQManagementState(StatesGroup):
@@ -79,6 +87,9 @@ def create_router(
     chief_booker_ids: set[int],
     duty_cutoff_hour: int,
     app_timezone: str,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
 ) -> Router:
     router = Router()
     duty_sections = resolve_duty_sections(faq)
@@ -216,8 +227,10 @@ def create_router(
             section_key="castings",
             section=duty_sections["castings"],
             duty_sections=duty_sections,
-            duty_cutoff_hour=duty_cutoff_hour,
             app_timezone=app_timezone,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
         )
 
     @router.message(Command("duty_income"))
@@ -233,8 +246,10 @@ def create_router(
             section_key="income",
             section=duty_sections["income"],
             duty_sections=duty_sections,
-            duty_cutoff_hour=duty_cutoff_hour,
             app_timezone=app_timezone,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
         )
 
     @router.message(Command("duty_status"))
@@ -280,12 +295,14 @@ def create_router(
                 section=duty_sections["castings"],
                 app_timezone=app_timezone,
             )
-            await forward_pending_after_cutoff_questions(
+            await flush_pending_questions_to_booker(
                 bot=bot,
                 database=database,
                 duty_sections=duty_sections,
-                duty_cutoff_hour=duty_cutoff_hour,
                 app_timezone=app_timezone,
+                workday_start_hour=workday_start_hour,
+                workday_end_hour=workday_end_hour,
+                workdays=workdays,
                 section_keys={"castings"},
             )
             await callback.message.edit_text(text, reply_markup=booker_panel_keyboard())
@@ -303,12 +320,14 @@ def create_router(
                 section=duty_sections["income"],
                 app_timezone=app_timezone,
             )
-            await forward_pending_after_cutoff_questions(
+            await flush_pending_questions_to_booker(
                 bot=bot,
                 database=database,
                 duty_sections=duty_sections,
-                duty_cutoff_hour=duty_cutoff_hour,
                 app_timezone=app_timezone,
+                workday_start_hour=workday_start_hour,
+                workday_end_hour=workday_end_hour,
+                workdays=workdays,
                 section_keys={"income"},
             )
             await callback.message.edit_text(text, reply_markup=booker_panel_keyboard())
@@ -322,6 +341,37 @@ def create_router(
             await callback.message.edit_text(
                 _duty_status_text(database, duty_sections),
                 reply_markup=booker_panel_keyboard(),
+            )
+
+    @router.callback_query(F.data.startswith("booker:reply:"))
+    async def booker_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+            return
+
+        question_id = _parse_index(callback.data, "booker:reply:")
+        if question_id is None:
+            await _answer_bad_callback(callback)
+            return
+
+        question = database.get_question(question_id)
+        error_text = _reply_question_error(
+            question=question,
+            user=callback.from_user,
+            chief_booker_ids=chief_booker_ids,
+        )
+        if error_text:
+            await state.clear()
+            await callback.answer(error_text, show_alert=True)
+            return
+
+        await state.clear()
+        await state.set_state(BookerReplyState.waiting_for_answer)
+        await state.update_data(question_id=question_id)
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                "Напишите ответ модели одним сообщением.",
+                reply_markup=home_keyboard(),
             )
 
     @router.callback_query(F.data == "faqm:menu")
@@ -731,8 +781,21 @@ def create_router(
         user = message.from_user
         full_name = _full_name(user)
         now = _now(app_timezone)
-        after_cutoff = _is_after_cutoff(now, duty_cutoff_hour)
+        is_working_time = _is_working_time(
+            now,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
+        )
         duty = database.get_duty_booker(section_key)
+        active_duty = _active_duty_booker(
+            duty=duty,
+            now=now,
+            app_timezone=app_timezone,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
+        )
 
         question_id = database.save_question(
             user_id=user.id if user else 0,
@@ -742,48 +805,113 @@ def create_router(
             section=section,
             question=question,
             created_at=_datetime_to_storage(now),
-            after_cutoff=after_cutoff,
+            after_cutoff=not is_working_time,
         )
         await state.clear()
 
-        if after_cutoff:
+        if not active_duty:
             await message.answer(
-                "Вопрос сохранён. После 19:00 такие вопросы передаются дежурному букеру следующего дня.",
-                reply_markup=home_keyboard(),
-            )
-            return
-
-        if not duty:
-            await message.answer(
-                "Вопрос сохранён. Сейчас дежурный букер не назначен, но команда сможет вернуться к нему позже.",
+                QUESTION_QUEUED_MESSAGE,
                 reply_markup=home_keyboard(),
             )
             return
 
         try:
             await bot.send_message(
-                chat_id=duty["user_id"],
+                chat_id=active_duty["user_id"],
                 text=_duty_question_text(
                     section=section,
                     question=question,
                     user=user,
+                    created_at=_datetime_to_storage(now),
+                    app_timezone=app_timezone,
                 ),
+                reply_markup=booker_reply_keyboard(question_id),
             )
-        except TelegramAPIError:
+        except TelegramAPIError as error:
             LOGGER.exception("Не удалось отправить вопрос %s дежурному букеру.", question_id)
+            database.remember_question_error(
+                question_id=question_id,
+                error_details=_telegram_error_details(error),
+                updated_at=_datetime_to_storage(_now(app_timezone)),
+            )
             await message.answer(
-                "Вопрос сохранён. Не смогла отправить его дежурному букеру, но команда сможет вернуться к нему позже.",
+                QUESTION_QUEUED_MESSAGE,
                 reply_markup=home_keyboard(),
             )
             return
 
-        database.mark_question_forwarded(
+        database.mark_question_sent_to_booker(
             question_id=question_id,
-            routed_to_booker_id=int(duty["user_id"]),
-            routed_at=_datetime_to_storage(_now(app_timezone)),
+            booker_id=int(active_duty["user_id"]),
+            sent_at=_datetime_to_storage(_now(app_timezone)),
         )
         await message.answer(
-            "Вопрос передан дежурному букеру.",
+            QUESTION_SENT_TO_BOOKER_MESSAGE,
+            reply_markup=home_keyboard(),
+        )
+
+    @router.message(BookerReplyState.waiting_for_answer)
+    async def booker_reply_received(
+        message: Message,
+        state: FSMContext,
+        bot: Bot,
+    ) -> None:
+        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
+            await state.clear()
+            await message.answer(NO_BOOKER_ACCESS_MESSAGE)
+            return
+
+        answer = _clean_message_text(message)
+        if not answer:
+            await message.answer(
+                "Пожалуйста, отправьте ответ обычным текстовым сообщением.",
+                reply_markup=home_keyboard(),
+            )
+            return
+
+        data = await state.get_data()
+        question_id = _state_question_id(data)
+        if question_id is None:
+            await state.clear()
+            await message.answer("Не удалось найти выбранный вопрос. Нажмите кнопку ответа ещё раз.")
+            return
+
+        question = database.get_question(question_id)
+        error_text = _reply_question_error(
+            question=question,
+            user=message.from_user,
+            chief_booker_ids=chief_booker_ids,
+        )
+        if error_text:
+            await state.clear()
+            await message.answer(error_text)
+            return
+
+        try:
+            await bot.send_message(chat_id=int(question["user_id"]), text=answer)
+        except TelegramAPIError as error:
+            LOGGER.exception("Не удалось отправить ответ по вопросу %s модели.", question_id)
+            database.mark_question_failed(
+                question_id=question_id,
+                error_details=_telegram_error_details(error),
+                failed_at=_datetime_to_storage(_now(app_timezone)),
+            )
+            await state.clear()
+            await message.answer(
+                "Не удалось отправить ответ модели. Возможно, модель заблокировала бот.",
+                reply_markup=home_keyboard(),
+            )
+            return
+
+        database.mark_question_answered(
+            question_id=question_id,
+            answer_text=answer,
+            answered_at=_datetime_to_storage(_now(app_timezone)),
+        )
+        await state.clear()
+        await message.answer(
+            "Ответ отправлен модели.",
             reply_markup=home_keyboard(),
         )
 
@@ -802,8 +930,10 @@ async def _set_duty(
     section_key: str,
     section: str,
     duty_sections: dict[str, str],
-    duty_cutoff_hour: int,
     app_timezone: str,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
 ) -> None:
     user = message.from_user
     if not user:
@@ -819,12 +949,14 @@ async def _set_duty(
             app_timezone=app_timezone,
         )
     )
-    await forward_pending_after_cutoff_questions(
+    await flush_pending_questions_to_booker(
         bot=bot,
         database=database,
         duty_sections=duty_sections,
-        duty_cutoff_hour=duty_cutoff_hour,
         app_timezone=app_timezone,
+        workday_start_hour=workday_start_hour,
+        workday_end_hour=workday_end_hour,
+        workdays=workdays,
         section_keys={section_key},
     )
 
@@ -954,7 +1086,14 @@ def _empty_marker_to_none(value: str) -> str | None:
     return cleaned
 
 
-def _duty_question_text(*, section: str, question: str, user: User | None) -> str:
+def _duty_question_text(
+    *,
+    section: str,
+    question: str,
+    user: User | None,
+    created_at: str,
+    app_timezone: str,
+) -> str:
     if user:
         username = f"@{user.username}" if user.username else "без username"
         user_line = f"{_full_name(user)} ({username}, ID: {user.id})"
@@ -965,16 +1104,20 @@ def _duty_question_text(*, section: str, question: str, user: User | None) -> st
         section=section,
         question=question,
         user_line=user_line,
+        created_at=created_at,
+        app_timezone=app_timezone,
     )
 
 
-def _stored_duty_question_text(question: dict) -> str:
+def _stored_duty_question_text(question: dict, *, app_timezone: str) -> str:
     username = f"@{question['username']}" if question.get("username") else "без username"
     user_line = f"{question['full_name']} ({username}, ID: {question['user_id']})"
     return _duty_question_text_with_user_line(
         section=str(question["section"]),
         question=str(question["question_text"]),
         user_line=user_line,
+        created_at=str(question["created_at"]),
+        app_timezone=app_timezone,
     )
 
 
@@ -983,11 +1126,14 @@ def _duty_question_text_with_user_line(
     section: str,
     question: str,
     user_line: str,
+    created_at: str,
+    app_timezone: str,
 ) -> str:
     return (
         "Новый вопрос от модели.\n\n"
         f"Раздел: {section}\n"
         f"Модель: {user_line}\n\n"
+        f"Создан: {_format_storage_datetime(created_at, app_timezone)}\n\n"
         f"Вопрос:\n{question}"
     )
 
@@ -997,24 +1143,100 @@ async def run_pending_question_checker(
     bot: Bot,
     database: Database,
     duty_sections: dict[str, str],
-    duty_cutoff_hour: int,
     app_timezone: str,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
     interval_seconds: int = PENDING_CHECK_INTERVAL_SECONDS,
 ) -> None:
     while True:
         try:
             await asyncio.sleep(interval_seconds)
-            await forward_pending_after_cutoff_questions(
+            await flush_pending_questions_to_booker(
                 bot=bot,
                 database=database,
                 duty_sections=duty_sections,
-                duty_cutoff_hour=duty_cutoff_hour,
                 app_timezone=app_timezone,
+                workday_start_hour=workday_start_hour,
+                workday_end_hour=workday_end_hour,
+                workdays=workdays,
             )
         except asyncio.CancelledError:
             raise
         except Exception:
             LOGGER.exception("Ошибка при проверке отложенных вопросов.")
+
+
+async def flush_pending_questions_to_booker(
+    *,
+    bot: Bot,
+    database: Database,
+    duty_sections: dict[str, str],
+    app_timezone: str,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
+    section_keys: set[str] | None = None,
+) -> int:
+    async with _PENDING_FORWARD_LOCK:
+        now = _now(app_timezone)
+        if not _is_working_time(
+            now,
+            workday_start_hour=workday_start_hour,
+            workday_end_hour=workday_end_hour,
+            workdays=workdays,
+        ):
+            return 0
+
+        duties = database.get_all_duty_bookers()
+        questions = database.get_pending_assignment_questions(section_keys=section_keys)
+        forwarded_count = 0
+
+        for question in questions:
+            section_key = str(question["section_key"])
+            if section_key not in duty_sections:
+                continue
+
+            duty = _active_duty_booker(
+                duty=duties.get(section_key),
+                now=now,
+                app_timezone=app_timezone,
+                workday_start_hour=workday_start_hour,
+                workday_end_hour=workday_end_hour,
+                workdays=workdays,
+            )
+            if not duty:
+                continue
+
+            try:
+                await bot.send_message(
+                    chat_id=int(duty["user_id"]),
+                    text=_stored_duty_question_text(question, app_timezone=app_timezone),
+                    reply_markup=booker_reply_keyboard(int(question["id"])),
+                )
+            except TelegramAPIError as error:
+                LOGGER.exception(
+                    "Не удалось отправить отложенный вопрос %s дежурному букеру.",
+                    question["id"],
+                )
+                database.remember_question_error(
+                    question_id=int(question["id"]),
+                    error_details=_telegram_error_details(error),
+                    updated_at=_datetime_to_storage(_now(app_timezone)),
+                )
+                continue
+
+            database.mark_question_sent_to_booker(
+                question_id=int(question["id"]),
+                booker_id=int(duty["user_id"]),
+                sent_at=_datetime_to_storage(_now(app_timezone)),
+            )
+            forwarded_count += 1
+
+        if forwarded_count:
+            LOGGER.info("Отправлено отложенных вопросов: %s", forwarded_count)
+
+        return forwarded_count
 
 
 async def forward_pending_after_cutoff_questions(
@@ -1025,82 +1247,20 @@ async def forward_pending_after_cutoff_questions(
     duty_cutoff_hour: int,
     app_timezone: str,
     section_keys: set[str] | None = None,
+    workday_start_hour: int = 0,
+    workday_end_hour: int | None = None,
+    workdays: frozenset[int] | set[int] | None = None,
 ) -> int:
-    async with _PENDING_FORWARD_LOCK:
-        now = _now(app_timezone)
-        duties = database.get_all_duty_bookers()
-        questions = database.get_pending_after_cutoff_questions(section_keys=section_keys)
-        forwarded_count = 0
-
-        for question in questions:
-            section_key = str(question["section_key"])
-            if section_key not in duty_sections:
-                continue
-
-            duty = duties.get(section_key)
-            if not duty or not _pending_question_is_due(
-                question=question,
-                duty=duty,
-                now=now,
-                duty_cutoff_hour=duty_cutoff_hour,
-                app_timezone=app_timezone,
-            ):
-                continue
-
-            try:
-                await bot.send_message(
-                    chat_id=int(duty["user_id"]),
-                    text=_stored_duty_question_text(question),
-                )
-            except TelegramAPIError:
-                LOGGER.exception(
-                    "Не удалось отправить отложенный вопрос %s дежурному букеру.",
-                    question["id"],
-                )
-                continue
-
-            database.mark_question_forwarded(
-                question_id=int(question["id"]),
-                routed_to_booker_id=int(duty["user_id"]),
-                routed_at=_datetime_to_storage(_now(app_timezone)),
-            )
-            forwarded_count += 1
-
-        if forwarded_count:
-            LOGGER.info("Отправлено отложенных вопросов: %s", forwarded_count)
-
-        return forwarded_count
-
-
-def _pending_question_is_due(
-    *,
-    question: dict,
-    duty: dict,
-    now: datetime,
-    duty_cutoff_hour: int,
-    app_timezone: str,
-) -> bool:
-    created_at = _parse_storage_datetime(str(question["created_at"]), app_timezone)
-    duty_updated_at = _parse_storage_datetime(str(duty["updated_at"]), app_timezone)
-    next_day = created_at.date() + timedelta(days=1)
-
-    duty_was_set_next_day = (
-        duty_updated_at > created_at
-        and duty_updated_at.date() >= next_day
+    return await flush_pending_questions_to_booker(
+        bot=bot,
+        database=database,
+        duty_sections=duty_sections,
+        app_timezone=app_timezone,
+        workday_start_hour=workday_start_hour,
+        workday_end_hour=workday_end_hour if workday_end_hour is not None else duty_cutoff_hour,
+        workdays=workdays or frozenset({1, 2, 3, 4, 5, 6, 7}),
+        section_keys=section_keys,
     )
-    if duty_was_set_next_day:
-        return True
-
-    next_day_cutoff = datetime.combine(
-        next_day,
-        time(hour=duty_cutoff_hour),
-        tzinfo=ZoneInfo(app_timezone),
-    )
-    return now >= next_day_cutoff
-
-
-def _is_after_cutoff(current_time: datetime, duty_cutoff_hour: int) -> bool:
-    return current_time.hour >= duty_cutoff_hour
 
 
 def _now(app_timezone: str) -> datetime:
@@ -1117,6 +1277,98 @@ def _parse_storage_datetime(value: str, app_timezone: str) -> datetime:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone)
     return parsed.astimezone(timezone)
+
+
+def _format_storage_datetime(value: str, app_timezone: str) -> str:
+    return _parse_storage_datetime(value, app_timezone).strftime("%Y-%m-%d %H:%M")
+
+
+def _active_duty_booker(
+    *,
+    duty: dict | None,
+    now: datetime,
+    app_timezone: str,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
+) -> dict | None:
+    if not duty:
+        return None
+    if not _is_working_time(
+        now,
+        workday_start_hour=workday_start_hour,
+        workday_end_hour=workday_end_hour,
+        workdays=workdays,
+    ):
+        return None
+
+    duty_updated_at = _parse_storage_datetime(str(duty["updated_at"]), app_timezone)
+    if duty_updated_at.date() != now.astimezone(ZoneInfo(app_timezone)).date():
+        return None
+
+    return duty
+
+
+def _is_working_time(
+    current_time: datetime,
+    *,
+    workday_start_hour: int,
+    workday_end_hour: int,
+    workdays: frozenset[int] | set[int],
+) -> bool:
+    return (
+        current_time.isoweekday() in workdays
+        and workday_start_hour <= current_time.hour < workday_end_hour
+    )
+
+
+def _reply_question_error(
+    *,
+    question: dict | None,
+    user: User | None,
+    chief_booker_ids: set[int],
+) -> str | None:
+    if not question:
+        return "Не удалось найти выбранный вопрос."
+
+    status = str(question.get("status") or "")
+    if status == "answered":
+        return "На этот вопрос уже ответили."
+    if status == "failed":
+        return "Этот вопрос отмечен как неотправленный. Попросите модель отправить вопрос заново."
+    if status not in SENT_TO_BOOKER_STATUSES:
+        return "Этот вопрос ещё не назначен букеру."
+
+    model_user_id = _safe_int(question.get("user_id"))
+    if model_user_id is None or model_user_id <= 0:
+        return "У вопроса нет Telegram ID модели, поэтому ответить через бот не получится."
+
+    assigned_booker_id = _safe_int(question.get("routed_to_booker_id"))
+    if (
+        assigned_booker_id is not None
+        and user
+        and assigned_booker_id != user.id
+        and not _is_chief_booker(user, chief_booker_ids)
+    ):
+        return "Этот вопрос назначен другому букеру."
+
+    return None
+
+
+def _state_question_id(data: dict) -> int | None:
+    return _safe_int(data.get("question_id"))
+
+
+def _safe_int(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _telegram_error_details(error: TelegramAPIError) -> str:
+    text = str(error).strip()
+    return text[:1000] if text else error.__class__.__name__
 
 
 async def _send_long_message(
@@ -1168,6 +1420,22 @@ async def _ensure_booker_callback(
     return False
 
 
+async def _ensure_booker_or_chief_callback(
+    callback: CallbackQuery,
+    authorized_booker_ids: set[int],
+    chief_booker_ids: set[int],
+) -> bool:
+    if _is_authorized_booker_or_chief(
+        callback.from_user,
+        authorized_booker_ids,
+        chief_booker_ids,
+    ):
+        return True
+
+    await callback.answer(NO_BOOKER_ACCESS_MESSAGE, show_alert=True)
+    return False
+
+
 async def _ensure_chief_booker_callback(
     callback: CallbackQuery,
     chief_booker_ids: set[int],
@@ -1195,6 +1463,14 @@ async def _ensure_chief_booker_message(
 
 def _is_authorized_booker(user: User | None, authorized_booker_ids: set[int]) -> bool:
     return bool(user and user.id in authorized_booker_ids)
+
+
+def _is_authorized_booker_or_chief(
+    user: User | None,
+    authorized_booker_ids: set[int],
+    chief_booker_ids: set[int],
+) -> bool:
+    return _is_authorized_booker(user, authorized_booker_ids) or _is_chief_booker(user, chief_booker_ids)
 
 
 def _is_chief_booker(user: User | None, chief_booker_ids: set[int]) -> bool:

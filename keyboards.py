@@ -74,6 +74,13 @@ def booker_panel_keyboard() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def booker_reply_keyboard(question_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Ответить модели", callback_data=f"booker:reply:{question_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def faq_management_keyboard() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="➕ Добавить вопрос", callback_data="faqm:add")

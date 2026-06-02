@@ -7,7 +7,7 @@ from config import load_settings
 from database import Database
 from handlers import (
     create_router,
-    forward_pending_after_cutoff_questions,
+    flush_pending_questions_to_booker,
     resolve_duty_sections,
     run_pending_question_checker,
 )
@@ -49,31 +49,39 @@ async def main() -> None:
             chief_booker_ids=settings.chief_booker_ids,
             duty_cutoff_hour=settings.duty_cutoff_hour,
             app_timezone=settings.app_timezone,
+            workday_start_hour=settings.workday_start_hour,
+            workday_end_hour=settings.workday_end_hour,
+            workdays=settings.workdays,
         )
     )
 
-    await forward_pending_after_cutoff_questions(
+    await flush_pending_questions_to_booker(
         bot=bot,
         database=database,
         duty_sections=duty_sections,
-        duty_cutoff_hour=settings.duty_cutoff_hour,
         app_timezone=settings.app_timezone,
+        workday_start_hour=settings.workday_start_hour,
+        workday_end_hour=settings.workday_end_hour,
+        workdays=settings.workdays,
     )
     pending_checker = asyncio.create_task(
         run_pending_question_checker(
             bot=bot,
             database=database,
             duty_sections=duty_sections,
-            duty_cutoff_hour=settings.duty_cutoff_hour,
             app_timezone=settings.app_timezone,
+            workday_start_hour=settings.workday_start_hour,
+            workday_end_hour=settings.workday_end_hour,
+            workdays=settings.workdays,
         )
     )
 
     logging.info(
-        "Бот запущен. Разделов: %s, вопросов: %s, cutoff: %s:00, timezone: %s",
+        "Бот запущен. Разделов: %s, вопросов: %s, рабочее время: %s:00-%s:00, timezone: %s",
         len(faq.sections),
         len(faq.items),
-        settings.duty_cutoff_hour,
+        settings.workday_start_hour,
+        settings.workday_end_hour,
         settings.app_timezone,
     )
     try:
