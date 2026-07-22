@@ -68,6 +68,24 @@ class Database:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS ordinary_bookers (
+                    telegram_id INTEGER PRIMARY KEY,
+                    username TEXT,
+                    display_name TEXT NOT NULL,
+                    added_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS faq_entries (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     callback_token TEXT UNIQUE NOT NULL,
@@ -90,6 +108,139 @@ class Database:
                 ON faq_entries(is_active, section, id)
                 """
             )
+
+    def import_bookers_from_config(
+        self,
+        booker_ids: set[int],
+        *,
+        chief_booker_ids: set[int],
+    ) -> int:
+        if not booker_ids:
+            return 0
+
+        with self._connect() as connection:
+            if self._get_metadata(connection, "bookers_imported_from_config") == "1":
+                return 0
+
+            imported_count = 0
+            now = self._now()
+            for telegram_id in sorted(booker_ids - chief_booker_ids):
+                if telegram_id <= 0:
+                    continue
+
+                known_profile = self._find_known_user_profile(connection, telegram_id)
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO ordinary_bookers (
+                        telegram_id, username, display_name, added_at
+                    )
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        telegram_id,
+                        known_profile.get("username"),
+                        known_profile.get("display_name") or f"Букер {telegram_id}",
+                        now,
+                    ),
+                )
+                imported_count += int(cursor.rowcount > 0)
+
+            self._set_metadata(connection, "bookers_imported_from_config", "1")
+            return imported_count
+
+    def list_bookers(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT telegram_id, username, display_name, added_at
+                FROM ordinary_bookers
+                ORDER BY display_name COLLATE NOCASE ASC, telegram_id ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_booker(self, telegram_id: int) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT telegram_id, username, display_name, added_at
+                FROM ordinary_bookers
+                WHERE telegram_id = ?
+                """,
+                (telegram_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def is_booker(self, telegram_id: int) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT 1
+                FROM ordinary_bookers
+                WHERE telegram_id = ?
+                """,
+                (telegram_id,),
+            ).fetchone()
+            return bool(row)
+
+    def add_booker(
+        self,
+        *,
+        telegram_id: int,
+        username: str | None,
+        display_name: str,
+        added_at: str | None = None,
+    ) -> bool:
+        if telegram_id <= 0:
+            raise ValueError("telegram_id must be a positive integer.")
+
+        cleaned_name = self._clean_required_text(display_name)
+        cleaned_username = self._clean_optional_text(username)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO ordinary_bookers (
+                    telegram_id, username, display_name, added_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (telegram_id, cleaned_username, cleaned_name, added_at or self._now()),
+            )
+            return bool(cursor.rowcount)
+
+    def remove_booker(self, telegram_id: int) -> bool:
+        with self._connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT 1
+                FROM ordinary_bookers
+                WHERE telegram_id = ?
+                """,
+                (telegram_id,),
+            ).fetchone()
+            if not existing:
+                return False
+
+            connection.execute(
+                """
+                DELETE FROM ordinary_bookers
+                WHERE telegram_id = ?
+                """,
+                (telegram_id,),
+            )
+            self._clear_duty_booker_for_user(connection, telegram_id)
+            self._return_booker_questions_to_queue(connection, telegram_id)
+            return True
+
+    def clear_duty_booker_for_user(self, user_id: int) -> int:
+        with self._connect() as connection:
+            return self._clear_duty_booker_for_user(connection, user_id)
+
+    def find_known_booker_username(self, telegram_id: int) -> str | None:
+        with self._connect() as connection:
+            profile = self._find_known_user_profile(connection, telegram_id)
+            username = profile.get("username")
+            return str(username) if username else None
 
     def get_active_faq_data(self) -> FAQData:
         with self._connect() as connection:
@@ -643,6 +794,124 @@ class Database:
                 """,
                 (error_details, updated_value, question_id),
             )
+
+    def _clear_duty_booker_for_user(
+        self,
+        connection: sqlite3.Connection,
+        user_id: int,
+    ) -> int:
+        cursor = connection.execute(
+            """
+            DELETE FROM duty_bookers
+            WHERE user_id = ?
+            """,
+            (user_id,),
+        )
+        return int(cursor.rowcount)
+
+    def _return_booker_questions_to_queue(
+        self,
+        connection: sqlite3.Connection,
+        user_id: int,
+    ) -> int:
+        cursor = connection.execute(
+            """
+            UPDATE unanswered_questions
+            SET
+                status = 'pending_assignment',
+                routed_to_booker_id = NULL,
+                routed_at = NULL,
+                updated_at = ?,
+                last_error = NULL
+            WHERE routed_to_booker_id = ?
+              AND status IN ('sent_to_booker', 'forwarded')
+            """,
+            (self._now(), user_id),
+        )
+        return int(cursor.rowcount)
+
+    def _find_known_user_profile(
+        self,
+        connection: sqlite3.Connection,
+        telegram_id: int,
+    ) -> dict[str, str | None]:
+        booker_row = connection.execute(
+            """
+            SELECT username, display_name
+            FROM ordinary_bookers
+            WHERE telegram_id = ?
+            """,
+            (telegram_id,),
+        ).fetchone()
+        if booker_row:
+            return {
+                "username": self._row_optional_value(booker_row["username"]),
+                "display_name": self._row_optional_value(booker_row["display_name"]),
+            }
+
+        duty_row = connection.execute(
+            """
+            SELECT username, full_name
+            FROM duty_bookers
+            WHERE user_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        ).fetchone()
+        if duty_row:
+            return {
+                "username": self._row_optional_value(duty_row["username"]),
+                "display_name": self._row_optional_value(duty_row["full_name"]),
+            }
+
+        question_row = connection.execute(
+            """
+            SELECT username, full_name
+            FROM unanswered_questions
+            WHERE user_id = ?
+            ORDER BY COALESCE(updated_at, created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            (telegram_id,),
+        ).fetchone()
+        if question_row:
+            return {
+                "username": self._row_optional_value(question_row["username"]),
+                "display_name": self._row_optional_value(question_row["full_name"]),
+            }
+
+        return {"username": None, "display_name": None}
+
+    def _get_metadata(
+        self,
+        connection: sqlite3.Connection,
+        key: str,
+    ) -> str | None:
+        row = connection.execute(
+            """
+            SELECT value
+            FROM app_metadata
+            WHERE key = ?
+            """,
+            (key,),
+        ).fetchone()
+        return str(row["value"]) if row else None
+
+    def _set_metadata(
+        self,
+        connection: sqlite3.Connection,
+        key: str,
+        value: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO app_metadata (key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
 
     def _migrate_unanswered_questions(self, connection: sqlite3.Connection) -> None:
         columns = {

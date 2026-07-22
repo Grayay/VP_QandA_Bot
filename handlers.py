@@ -17,6 +17,10 @@ from database import Database
 from faq_loader import FAQData, FAQItem, is_transfer_to_booker_answer
 from keyboards import (
     answer_navigation_keyboard,
+    booker_add_step_keyboard,
+    booker_delete_confirm_keyboard,
+    booker_delete_keyboard,
+    booker_management_keyboard,
     booker_panel_keyboard,
     booker_reply_keyboard,
     faq_add_confirm_keyboard,
@@ -36,6 +40,7 @@ from keyboards import (
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 NO_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к панели букера."
 NO_CHIEF_BOOKER_ACCESS_MESSAGE = "У вас нет доступа к управлению вопросами."
+NO_BOOKER_MANAGEMENT_ACCESS_MESSAGE = "У вас нет доступа к управлению букерами."
 PENDING_CHECK_INTERVAL_SECONDS = 300
 QUESTION_QUEUED_MESSAGE = "Спасибо! Вопрос сохранён. Букер ответит, когда будет на связи."
 QUESTION_SENT_TO_BOOKER_MESSAGE = "Вопрос передан дежурному букеру."
@@ -63,6 +68,11 @@ class QuestionState(StatesGroup):
 
 class BookerReplyState(StatesGroup):
     waiting_for_answer = State()
+
+
+class BookerManagementState(StatesGroup):
+    waiting_for_telegram_id = State()
+    waiting_for_display_name = State()
 
 
 class FAQManagementState(StatesGroup):
@@ -105,9 +115,25 @@ def create_router(
             sections,
             section_indexes=section_indexes,
             root_questions=root_questions,
-            is_booker=_is_authorized_booker_or_chief(user, authorized_booker_ids, chief_booker_ids),
+            is_booker=_is_authorized_booker_or_chief(
+                user,
+                authorized_booker_ids,
+                chief_booker_ids,
+                database=database,
+            ),
             is_chief_booker=_is_chief_booker(user, chief_booker_ids),
         )
+
+    async def show_booker_management_menu(
+        callback: CallbackQuery,
+        *,
+        state: FSMContext | None = None,
+        text: str = "Управление букерами:",
+    ) -> None:
+        if state:
+            await state.clear()
+        if callback.message:
+            await callback.message.edit_text(text, reply_markup=booker_management_keyboard())
 
     async def show_faq_management_menu(
         callback: CallbackQuery,
@@ -198,7 +224,11 @@ def create_router(
     @router.message(Command("booker_debug"))
     async def booker_debug(message: Message) -> None:
         user_id = message.from_user.id if message.from_user else None
-        is_authorized = _is_authorized_booker(message.from_user, authorized_booker_ids)
+        is_authorized = _is_authorized_booker(
+            message.from_user,
+            authorized_booker_ids,
+            database=database,
+        )
         is_chief = _is_chief_booker(message.from_user, chief_booker_ids)
         user_id_text = str(user_id) if user_id is not None else "не удалось определить"
         status_text = "да" if is_authorized else "нет"
@@ -211,6 +241,7 @@ def create_router(
                     f"Вы авторизованы как букер: {status_text}",
                     f"Вы авторизованы как главный букер: {chief_status_text}",
                     f"Загружено BOOKER_IDS: {len(authorized_booker_ids)}",
+                    f"Обычных букеров в базе: {len(database.list_bookers())}",
                     f"Загружено CHIEF_BOOKER_IDS: {len(chief_booker_ids)}",
                 ]
             )
@@ -218,7 +249,12 @@ def create_router(
 
     @router.message(Command("duty"))
     async def duty(message: Message, bot: Bot) -> None:
-        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
+        if not _is_authorized_booker_or_chief(
+            message.from_user,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             await message.answer(NO_BOOKER_ACCESS_MESSAGE)
             return
 
@@ -245,7 +281,12 @@ def create_router(
 
     @router.message(Command("duty_status"))
     async def duty_status(message: Message) -> None:
-        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
+        if not _is_authorized_booker_or_chief(
+            message.from_user,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             await message.answer(NO_BOOKER_ACCESS_MESSAGE)
             return
 
@@ -264,7 +305,12 @@ def create_router(
 
     @router.callback_query(F.data == "booker_panel")
     async def booker_panel(callback: CallbackQuery) -> None:
-        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+        if not await _ensure_booker_or_chief_callback(
+            callback,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             return
 
         if callback.message:
@@ -275,7 +321,12 @@ def create_router(
 
     @router.callback_query(F.data == "booker:duty_general")
     async def booker_duty_general(callback: CallbackQuery, bot: Bot) -> None:
-        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+        if not await _ensure_booker_or_chief_callback(
+            callback,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             return
 
         if callback.message:
@@ -299,7 +350,12 @@ def create_router(
 
     @router.callback_query(F.data == "booker:duty_income")
     async def booker_duty_income_legacy(callback: CallbackQuery, bot: Bot) -> None:
-        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+        if not await _ensure_booker_or_chief_callback(
+            callback,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             return
 
         if callback.message:
@@ -327,7 +383,12 @@ def create_router(
 
     @router.callback_query(F.data == "booker:status")
     async def booker_status(callback: CallbackQuery) -> None:
-        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+        if not await _ensure_booker_or_chief_callback(
+            callback,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             return
 
         if callback.message:
@@ -338,7 +399,12 @@ def create_router(
 
     @router.callback_query(F.data.startswith("booker:reply:"))
     async def booker_reply_start(callback: CallbackQuery, state: FSMContext) -> None:
-        if not await _ensure_booker_or_chief_callback(callback, authorized_booker_ids, chief_booker_ids):
+        if not await _ensure_booker_or_chief_callback(
+            callback,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             return
 
         question_id = _parse_index(callback.data, "booker:reply:")
@@ -366,6 +432,208 @@ def create_router(
                 "Напишите ответ модели одним сообщением.",
                 reply_markup=home_keyboard(),
             )
+
+    @router.callback_query(F.data == "bookers:menu")
+    async def booker_management_menu(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        await show_booker_management_menu(callback, state=state)
+
+    @router.callback_query(F.data == "bookers:cancel")
+    async def booker_management_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        await show_booker_management_menu(callback, state=state, text="Действие отменено.")
+
+    @router.callback_query(F.data == "bookers:list")
+    async def booker_management_list(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        await state.clear()
+        if callback.message:
+            await callback.message.edit_text(
+                _bookers_list_text(database.list_bookers()),
+                reply_markup=booker_management_keyboard(),
+            )
+
+    @router.callback_query(F.data == "bookers:add")
+    async def booker_add_start(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        await state.clear()
+        await state.set_state(BookerManagementState.waiting_for_telegram_id)
+        if callback.message:
+            await callback.message.edit_text(
+                "Введите Telegram ID нового букера.",
+                reply_markup=booker_add_step_keyboard(),
+            )
+
+    @router.message(BookerManagementState.waiting_for_telegram_id)
+    async def booker_add_telegram_id_received(message: Message, state: FSMContext) -> None:
+        if not await _ensure_booker_management_message(message, chief_booker_ids, state):
+            return
+
+        telegram_id = _parse_positive_telegram_id(message.text)
+        if telegram_id is None:
+            await message.answer(
+                "Telegram ID должен быть целым положительным числом.",
+                reply_markup=booker_add_step_keyboard(),
+            )
+            return
+
+        if telegram_id in chief_booker_ids:
+            await message.answer(
+                "Главного администратора нельзя добавить как обычного букера.",
+                reply_markup=booker_add_step_keyboard(),
+            )
+            return
+
+        if database.get_booker(telegram_id):
+            await message.answer(
+                "Такой букер уже есть в списке.",
+                reply_markup=booker_add_step_keyboard(),
+            )
+            return
+
+        await state.update_data(
+            telegram_id=telegram_id,
+            username=database.find_known_booker_username(telegram_id),
+        )
+        await state.set_state(BookerManagementState.waiting_for_display_name)
+        await message.answer(
+            "Введите отображаемое имя букера.",
+            reply_markup=booker_add_step_keyboard(),
+        )
+
+    @router.message(BookerManagementState.waiting_for_display_name)
+    async def booker_add_display_name_received(message: Message, state: FSMContext) -> None:
+        if not await _ensure_booker_management_message(message, chief_booker_ids, state):
+            return
+
+        display_name = _clean_message_text(message)
+        if not display_name:
+            await message.answer(
+                "Отображаемое имя не должно быть пустым.",
+                reply_markup=booker_add_step_keyboard(),
+            )
+            return
+
+        data = await state.get_data()
+        telegram_id = _safe_int(data.get("telegram_id"))
+        if telegram_id is None or telegram_id <= 0:
+            await state.clear()
+            await message.answer(
+                "Не удалось добавить букера. Начните добавление заново.",
+                reply_markup=booker_management_keyboard(),
+            )
+            return
+
+        if telegram_id in chief_booker_ids:
+            await state.clear()
+            await message.answer(
+                "Главного администратора нельзя добавить как обычного букера.",
+                reply_markup=booker_management_keyboard(),
+            )
+            return
+
+        added = database.add_booker(
+            telegram_id=telegram_id,
+            username=str(data.get("username")) if data.get("username") else None,
+            display_name=display_name,
+        )
+        await state.clear()
+        if not added:
+            await message.answer(
+                "Такой букер уже есть в списке.",
+                reply_markup=booker_management_keyboard(),
+            )
+            return
+
+        await message.answer(
+            f"Букер {display_name} добавлен.",
+            reply_markup=booker_management_keyboard(),
+        )
+
+    @router.callback_query(F.data == "bookers:delete")
+    async def booker_delete_list(callback: CallbackQuery, state: FSMContext) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        await state.clear()
+        bookers = database.list_bookers()
+        if callback.message:
+            if not bookers:
+                await callback.message.edit_text(
+                    "Обычных букеров пока нет.",
+                    reply_markup=booker_management_keyboard(),
+                )
+                return
+
+            await callback.message.edit_text(
+                "Выберите букера для удаления:",
+                reply_markup=booker_delete_keyboard(bookers),
+            )
+
+    @router.callback_query(F.data.startswith("bookers:delete_select:"))
+    async def booker_delete_select(callback: CallbackQuery) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        telegram_id = _parse_positive_telegram_id(
+            (callback.data or "").removeprefix("bookers:delete_select:")
+        )
+        error_text = _booker_delete_error(telegram_id, chief_booker_ids, database)
+        if error_text:
+            await callback.answer(error_text, show_alert=True)
+            return
+
+        booker = database.get_booker(telegram_id)
+        if not booker:
+            await callback.answer("Не удалось найти выбранного букера.", show_alert=True)
+            return
+
+        if callback.message:
+            await callback.message.edit_text(
+                f"Удалить букера {booker['display_name']}?",
+                reply_markup=booker_delete_confirm_keyboard(telegram_id),
+            )
+
+    @router.callback_query(F.data.startswith("bookers:delete_confirm:"))
+    async def booker_delete_confirm(callback: CallbackQuery) -> None:
+        if not await _ensure_booker_management_callback(callback, chief_booker_ids):
+            return
+
+        telegram_id = _parse_positive_telegram_id(
+            (callback.data or "").removeprefix("bookers:delete_confirm:")
+        )
+        error_text = _booker_delete_error(telegram_id, chief_booker_ids, database)
+        if error_text:
+            await callback.answer(error_text, show_alert=True)
+            return
+
+        booker = database.get_booker(telegram_id)
+        if not booker:
+            await callback.answer("Не удалось найти выбранного букера.", show_alert=True)
+            return
+
+        database.remove_booker(telegram_id)
+        if callback.message:
+            await callback.message.edit_text(
+                f"Букер {booker['display_name']} удалён.",
+                reply_markup=booker_management_keyboard(),
+            )
+
+    @router.callback_query(F.data.startswith("bookers:"))
+    async def booker_management_unknown(callback: CallbackQuery) -> None:
+        if not _is_chief_booker(callback.from_user, chief_booker_ids):
+            await callback.answer(NO_BOOKER_MANAGEMENT_ACCESS_MESSAGE, show_alert=True)
+            return
+
+        await _answer_bad_callback(callback)
 
     @router.callback_query(F.data == "faqm:menu")
     async def faq_management_menu(callback: CallbackQuery, state: FSMContext) -> None:
@@ -850,7 +1118,12 @@ def create_router(
         state: FSMContext,
         bot: Bot,
     ) -> None:
-        if not _is_authorized_booker_or_chief(message.from_user, authorized_booker_ids, chief_booker_ids):
+        if not _is_authorized_booker_or_chief(
+            message.from_user,
+            authorized_booker_ids,
+            chief_booker_ids,
+            database=database,
+        ):
             await state.clear()
             await message.answer(NO_BOOKER_ACCESS_MESSAGE)
             return
@@ -1385,11 +1658,57 @@ def _parse_index(data: str | None, prefix: str) -> int | None:
     return value if value >= 0 else None
 
 
+def _parse_positive_telegram_id(value: str | None) -> int | None:
+    try:
+        telegram_id = int((value or "").strip())
+    except ValueError:
+        return None
+    return telegram_id if telegram_id > 0 else None
+
+
+def _bookers_list_text(bookers: list[dict]) -> str:
+    if not bookers:
+        return "Обычных букеров пока нет."
+
+    lines = ["Обычные букеры:"]
+    for booker in bookers:
+        lines.append(f"- {_format_booker_record(booker)}")
+    return "\n".join(lines)
+
+
+def _format_booker_record(booker: dict) -> str:
+    username = _format_username(booker.get("username"))
+    return f"{booker['display_name']} ({username}, ID: {booker['telegram_id']})"
+
+
+def _format_username(username: object) -> str:
+    text = str(username or "").strip()
+    if not text:
+        return "без username"
+    return text if text.startswith("@") else f"@{text}"
+
+
+def _booker_delete_error(
+    telegram_id: int | None,
+    chief_booker_ids: set[int],
+    database: Database,
+) -> str | None:
+    if telegram_id is None:
+        return "Не удалось найти выбранного букера."
+    if telegram_id in chief_booker_ids:
+        return "Главных администраторов нельзя удалять через это меню."
+    if not database.get_booker(telegram_id):
+        return "Не удалось найти выбранного букера."
+    return None
+
+
 async def _ensure_booker_callback(
     callback: CallbackQuery,
     authorized_booker_ids: set[int],
+    *,
+    database: Database | None = None,
 ) -> bool:
-    if _is_authorized_booker(callback.from_user, authorized_booker_ids):
+    if _is_authorized_booker(callback.from_user, authorized_booker_ids, database=database):
         await callback.answer()
         return True
 
@@ -1401,11 +1720,14 @@ async def _ensure_booker_or_chief_callback(
     callback: CallbackQuery,
     authorized_booker_ids: set[int],
     chief_booker_ids: set[int],
+    *,
+    database: Database | None = None,
 ) -> bool:
     if _is_authorized_booker_or_chief(
         callback.from_user,
         authorized_booker_ids,
         chief_booker_ids,
+        database=database,
     ):
         return True
 
@@ -1425,6 +1747,18 @@ async def _ensure_chief_booker_callback(
     return False
 
 
+async def _ensure_booker_management_callback(
+    callback: CallbackQuery,
+    chief_booker_ids: set[int],
+) -> bool:
+    if _is_chief_booker(callback.from_user, chief_booker_ids):
+        await callback.answer()
+        return True
+
+    await callback.answer(NO_BOOKER_MANAGEMENT_ACCESS_MESSAGE, show_alert=True)
+    return False
+
+
 async def _ensure_chief_booker_message(
     message: Message,
     chief_booker_ids: set[int],
@@ -1438,7 +1772,29 @@ async def _ensure_chief_booker_message(
     return False
 
 
-def _is_authorized_booker(user: User | None, authorized_booker_ids: set[int]) -> bool:
+async def _ensure_booker_management_message(
+    message: Message,
+    chief_booker_ids: set[int],
+    state: FSMContext,
+) -> bool:
+    if _is_chief_booker(message.from_user, chief_booker_ids):
+        return True
+
+    await state.clear()
+    await message.answer(NO_BOOKER_MANAGEMENT_ACCESS_MESSAGE)
+    return False
+
+
+def _is_authorized_booker(
+    user: User | None,
+    authorized_booker_ids: set[int],
+    *,
+    database: Database | None = None,
+) -> bool:
+    if not user:
+        return False
+    if database is not None:
+        return database.is_booker(user.id)
     return bool(user and user.id in authorized_booker_ids)
 
 
@@ -1446,8 +1802,14 @@ def _is_authorized_booker_or_chief(
     user: User | None,
     authorized_booker_ids: set[int],
     chief_booker_ids: set[int],
+    *,
+    database: Database | None = None,
 ) -> bool:
-    return _is_authorized_booker(user, authorized_booker_ids) or _is_chief_booker(user, chief_booker_ids)
+    return _is_authorized_booker(
+        user,
+        authorized_booker_ids,
+        database=database,
+    ) or _is_chief_booker(user, chief_booker_ids)
 
 
 def _is_chief_booker(user: User | None, chief_booker_ids: set[int]) -> bool:

@@ -27,11 +27,17 @@ async def main() -> None:
 
     logging.info("Загружено авторизованных BOOKER_IDS: %s", len(settings.booker_ids))
     logging.info("Загружено CHIEF_BOOKER_IDS: %s", len(settings.chief_booker_ids))
-    if not settings.booker_ids:
-        logging.warning("BOOKER_IDS пустой. Панель букера не будет доступна никому.")
 
     database = Database(settings.db_file)
     database.init()
+    imported_bookers = database.import_bookers_from_config(
+        settings.booker_ids,
+        chief_booker_ids=settings.chief_booker_ids,
+    )
+    if imported_bookers:
+        logging.info("Импортировано обычных букеров из BOOKER_IDS: %s", imported_bookers)
+    if not database.list_bookers() and not settings.chief_booker_ids:
+        logging.warning("В базе нет обычных букеров и CHIEF_BOOKER_IDS пустой. Панель букера не будет доступна никому.")
     faq = database.get_active_faq_data()
     if not faq.items:
         logging.warning(

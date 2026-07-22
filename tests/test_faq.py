@@ -79,6 +79,7 @@ class FAQTests(unittest.TestCase):
         texts = [button.text for row in markup.inline_keyboard for button in row]
 
         self.assertNotIn("⚙️ Управление вопросами", texts)
+        self.assertNotIn("Управление букерами", texts)
         self.assertNotIn("С кем связаться", texts)
         self.assertFalse(_is_chief_booker(UserStub(1), {2}))
 
@@ -160,6 +161,7 @@ class FAQTests(unittest.TestCase):
         texts = [button.text for row in markup.inline_keyboard for button in row]
 
         self.assertIn("⚙️ Управление вопросами", texts)
+        self.assertIn("Управление букерами", texts)
 
     def test_normal_user_does_not_get_management_control_on_flattened_menu(self) -> None:
         faq = self._faq_data_with_flattened_sections()
@@ -174,6 +176,7 @@ class FAQTests(unittest.TestCase):
         texts = [button.text for row in markup.inline_keyboard for button in row]
 
         self.assertNotIn("⚙️ Управление вопросами", texts)
+        self.assertNotIn("Управление букерами", texts)
 
     def test_booker_panel_shows_single_unified_duty_button(self) -> None:
         markup = booker_panel_keyboard()

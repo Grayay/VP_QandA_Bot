@@ -25,6 +25,7 @@ def main_menu_keyboard(
         builder.button(text="Панель букера", callback_data="booker_panel")
     if is_chief_booker:
         builder.button(text="⚙️ Управление вопросами", callback_data="faqm:menu")
+        builder.button(text="Управление букерами", callback_data="bookers:menu")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -76,6 +77,43 @@ def booker_panel_keyboard() -> InlineKeyboardMarkup:
 def booker_reply_keyboard(question_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="Ответить модели", callback_data=f"booker:reply:{question_id}")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def booker_management_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Список букеров", callback_data="bookers:list")
+    builder.button(text="Добавить букера", callback_data="bookers:add")
+    builder.button(text="Удалить букера", callback_data="bookers:delete")
+    builder.button(text="Назад", callback_data="main_menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def booker_add_step_keyboard() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Отмена", callback_data="bookers:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def booker_delete_keyboard(bookers: list[dict]) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for booker in bookers:
+        builder.button(
+            text=str(booker["display_name"]),
+            callback_data=f"bookers:delete_select:{booker['telegram_id']}",
+        )
+    builder.button(text="Назад", callback_data="bookers:menu")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def booker_delete_confirm_keyboard(telegram_id: int) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    builder.button(text="Да, удалить", callback_data=f"bookers:delete_confirm:{telegram_id}")
+    builder.button(text="Отмена", callback_data="bookers:delete")
     builder.adjust(1)
     return builder.as_markup()
 
